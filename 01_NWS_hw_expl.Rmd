@@ -1,0 +1,42 @@
+---
+title: "01_NWS_hw_expl"
+author: "Puvvula"
+date: "2023-10-18"
+output: pdf_document
+---
+
+```{r}
+library(pacman)
+p_load(tidyverse, janitor, readxl)
+```
+
+```{r}
+# Function to format date and time
+format_datetime <- function(column) {
+  as.POSIXct(column, format = "%Y-%m-%d %H:%M") %>%
+    format("%B %d, %Y %I:%M %p")
+}
+
+#all warnings
+nws_df<- readxl::read_xlsx("~/Documents/extr_heat_proposal/IEM_NWS.xlsx") 
+```
+
+#filtered heatwaves
+```{r}
+nws_hw <- nws_df |>
+  mutate(
+    utc_issue = ymd_hm(utc_issue),
+    utc_expire = ymd_hm(utc_expire),
+    utc_prodissue = ymd_hm(utc_prodissue),
+    year = year(utc_issue)  
+  ) |>
+  filter(phenomena %in% c("EH", "HT"))
+```
+
+# Count unique event IDs per year and per wfo
+```{r}
+count_per_year_per_wfo <- nws_hw |>
+  group_by(wfo, year) |>
+  summarise(unique_event_ids = n_distinct(eventid))
+```
+
