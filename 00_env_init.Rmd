@@ -7,6 +7,6 @@ output: pdf_document
 
 ```{r}
 library(pacman)
-pacman::p_load(tidyverse, tidycensus, janitor, sf, tigris, viridis)
+pacman::p_load(tidyverse, tidycensus, janitor, sf, tigris, viridis, reshape2)
 ```
 
