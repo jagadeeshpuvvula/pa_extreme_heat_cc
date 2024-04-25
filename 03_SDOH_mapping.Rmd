@@ -1,0 +1,71 @@
+---
+title: "03_testing_maps"
+author: "Puvvula"
+date: "2024-04-23"
+output: pdf_document
+---
+
+#get state boundaries
+```{r}
+state_shp<- states(cb=F) |>
+  filter(STUSPS %in% c("PA", "NJ", "DE"))
+```
+
+#read processed SDOH data
+```{r}
+load("~/Documents/extreme_heat_cc/data/SDOH_final.RDA")
+```
+
+#long formatting
+```{r}
+dat_fin_long <- dat_fin |>
+  rename(`Non-Hispanic Black` = blk_pct,
+         Hispanic = hisp_pct,
+         Asian = asin_pct,
+         `Alaska/Pacific-Islander` = alask_pacf_isl_pct,
+         `Health insurance` = ins_pct,
+         `Federal assistance` =ssi_snap_pct,
+         `Households in poverty` = poverty_pct,
+         `Un-employment` = un_empl_pct,
+         `Language barrier` = langu_pct,
+         `Single parent` =sing_prnt_pct,
+         `Foregin born` = foregin_born_pct,
+         `Access to vechilce` = no_vehic
+         )|>
+  select(c(13, 16:27)) |>
+  pivot_longer(cols = -geometry.x, names_to = "variable", values_to = "value")
+```
+
+#sequence for facets
+```{r}
+desired_order <- c("Non-Hispanic Black", "Hispanic", "Asian", "Alaska/Pacific-Islander", 
+                   "Households in poverty", "Federal assistance", "Un-employment",
+                   "Health insurance", "Language barrier", "Single parent",
+                   "Access to vechilce",
+                   "Foregin born")
+
+dat_fin_long$variable <- factor(dat_fin_long$variable, levels = desired_order)
+```
+
+
+#test mapping
+```{r}
+color_palette <- viridis(3, option = "D")
+ggplot() +
+  geom_sf(data=dat_fin_long, aes(geometry = geometry.x, fill = value), color=NA) + 
+  geom_sf(data = state_shp, aes(geometry = geometry), fill= NA, color = "white", size = 8) +
+  scale_fill_viridis_c() +  # Use viridis color palette for continuous scale
+  theme_void() +
+  facet_wrap(~ variable)+
+  theme(legend.position = "bottom",
+        legend.direction = "horizontal",
+        strip.text = element_text(size = 12, face = "bold", angle = 0, hjust = 0.5),
+        strip.background = element_blank()) 
+
+ggsave("~/Documents/extreme_heat_cc/data/maps_prelim_consl.pdf", 
+       width = 16,height = 10,
+       dpi=300)
+```
+
+
+
