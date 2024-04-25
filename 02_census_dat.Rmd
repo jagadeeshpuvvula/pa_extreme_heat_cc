@@ -1,0 +1,220 @@
+---
+title: "census_dat"
+author: "Puvvula"
+date: "2023-10-19"
+output: pdf_document
+---
+
+#find relavent variables
+```{r}
+var_df<- load_variables(2021, "acs5", cache = TRUE) |> filter(geography=="tract")
+```
+
+#Extracting variables from 2017-2021 US Census API
+```{r}
+ped_pop_tract <- get_acs(geography = "tract", #census block group
+                  state = c("PA", "NJ", "DE"),
+                  year=2021,
+                  survey = "acs5",
+                  variables=c(mg1_pop= "B01001_003",mg2_pop= "B01001_004",mg3_pop= "B01001_005",mg4_pop= "B01001_006",mg5_pop= "B01001_007",
+                              fg1_pop= "B01001_027",fg2_pop= "B01001_028",fg3_pop= "B01001_029",fg4_pop= "B01001_030",fg5_pop= "B01001_031",
+                              mg1_blk_pop= "B01001B_003",mg2_blk_pop= "B01001B_004",mg3_blk_pop= "B01001B_005",
+                              mg4_blk_pop= "B01001B_006",mg5_blk_pop= "B01001B_007",
+                              fg1_blk_pop= "B01001B_018",fg2_blk_pop= "B01001B_019",fg3_blk_pop= "B01001B_020",
+                              fg4_blk_pop= "B01001B_021",fg5_blk_pop= "B01001B_022",
+                              mg1_hisp_pop= "B01001I_003",mg2_hisp_pop= "B01001I_004",mg3_hisp_pop= "B01001I_005",
+                              mg4_hisp_pop= "B01001I_006",mg5_hisp_pop= "B01001I_007",
+                              fg1_hisp_pop= "B01001I_018",fg2_hisp_pop= "B01001I_019",
+                              fg3_hisp_pop= "B01001I_020",fg4_hisp_pop= "B01001I_021",fg5_hisp_pop= "B01001I_022",
+                              
+                              mg1_asin_pop = "B01001D_003", mg2_asin_pop = "B01001D_004", mg3_asin_pop = "B01001D_005",
+                              mg4_asin_pop = "B01001D_006", mg5_asin_pop = "B01001D_007",
+                              fg1_asin_pop = "B01001D_018", fg2_asin_pop = "B01001D_019", fg3_asin_pop = "B01001D_020",
+                              fg4_asin_pop = "B01001D_021", fg5_asin_pop = "B01001D_022",
+                              
+                              mg1_alask_pop = "B01001C_003", mg2_alask_pop = "B01001C_004", mg3_alask_pop = "B01001C_005",
+                              mg4_alask_pop = "B01001C_006", mg5_alask_pop = "B01001C_007",
+                              fg1_alask_pop = "B01001C_018", fg2_alask_pop = "B01001C_019", fg3_alask_pop = "B01001C_020",
+                              fg4_alask_pop = "B01001C_021", fg5_alask_pop = "B01001C_022",
+                              
+                              mg1_haw_pacf_is_pop = "B01001E_003", mg2_haw_pacf_is_pop = "B01001E_004", 
+                              mg3_haw_pacf_is_pop = "B01001E_005",
+                              mg4_haw_pacf_is_pop = "B01001E_006", mg5_haw_pacf_is_pop = "B01001E_007",
+                              fg1_haw_pacf_is_pop = "B01001E_018", fg2_haw_pacf_is_pop = "B01001E_019", 
+                              fg3_haw_pacf_is_pop = "B01001E_020",
+                              fg4_haw_pacf_is_pop = "B01001E_021", fg5_haw_pacf_is_pop = "B01001E_022",
+                              
+                              ssi_snap="B22002_003",
+                              no_hel_ins_mu6="B27001_005",no_hel_ins_m6_18="B27001_008",
+                              no_hel_ins_fu6="B27001_033",no_hel_ins_f6_18="B27001_036",
+                              foregin_born="B06012_013",
+                              poverty="B06012_002",
+                              sing_prnt_u6="B05009_013", sing_prnt_6_17="B05009_031",
+                              education="B16010_002",
+                              langu="B06007_008",
+                              no_vehic="B08201_002",
+                              median_incom="B10010_001",
+                              hous_w_pedpop="B11005_002",hous_wo_pedpop="B11005_011",
+                              total_pop = "B01001A_001"),
+                  geometry = T,
+                  output = "wide") %>% clean_names()
+```
+
+#extracting variables at blockgroup
+```{r}
+ped_pop_blk_grp<- get_acs(geography = "block group", 
+                  state = c("PA", "NJ", "DE"),
+                  year=2021,
+                  survey = "acs5",
+                  variables=c(un_empl_hsb="B23007_010"),
+                  geometry = T,
+                  output = "wide") %>% clean_names() |>
+  select(c("name", "un_empl_hsb_e")) 
+
+#aggregating block group level data to tract level
+ped_pop_blk_grp_aggr <- ped_pop_blk_grp |>
+  mutate(name = if_else(grepl("^Block Group", name),
+                                  str_remove(name, "^[^,]+, "),
+                                  name)) |>
+  as_tibble() |>
+  select(-c("geometry")) |>
+  group_by(name) |>
+  summarize(total_un_empl_hsb_e = sum(un_empl_hsb_e))
+```
+
+#join unemployment with other census tract level data
+```{r}
+ped_pop<- left_join(ped_pop_tract, ped_pop_blk_grp_aggr, by="name")
+```
+
+#aggregating age groups to represent pediatric population
+```{r}
+ped_pop$m_pop <- as.numeric(ped_pop$mg1_pop_e+ ped_pop$mg2_pop_e+ ped_pop$mg3_pop_e+
+                              ped_pop$mg4_pop_e+ped_pop$mg5_pop_e)
+ped_pop$f_pop <- as.numeric(ped_pop$fg1_pop_e+ ped_pop$fg2_pop_e+ ped_pop$fg3_pop_e+
+                              ped_pop$fg4_pop_e+ped_pop$fg5_pop_e)
+
+#Total households
+ped_pop$households<-as.numeric(ped_pop$hous_w_pedpop_e+ped_pop$hous_wo_pedpop_e)
+
+#Population by race
+##Black
+ped_pop$m_blk_pop<-as.numeric(ped_pop$mg1_blk_pop_e+ped_pop$mg2_blk_pop_e+ped_pop$mg3_blk_pop_e+
+                                ped_pop$mg4_blk_pop_e+ped_pop$mg5_blk_pop_e)
+ped_pop$f_blk_pop<-as.numeric(ped_pop$fg1_blk_pop_e+ped_pop$fg2_blk_pop_e+ped_pop$fg3_blk_pop_e+
+                                ped_pop$fg4_blk_pop_e+ped_pop$fg5_blk_pop_e)
+##Hispanic
+ped_pop$m_hisp_pop<- as.numeric(ped_pop$mg1_hisp_pop_e+ped_pop$mg2_hisp_pop_e+ped_pop$mg3_hisp_pop_e+
+                                  ped_pop$mg4_hisp_pop_e+ped_pop$mg5_hisp_pop_e)
+ped_pop$f_hisp_pop<- as.numeric(ped_pop$fg1_hisp_pop_e+ped_pop$fg2_hisp_pop_e+ped_pop$fg3_hisp_pop_e+
+                                  ped_pop$fg4_hisp_pop_e+ped_pop$fg5_hisp_pop_e)
+
+
+##Asian
+ped_pop$m_asin_pop <- as.numeric(ped_pop$mg1_asin_pop_e + ped_pop$mg2_asin_pop_e + ped_pop$mg3_asin_pop_e +
+                                 ped_pop$mg4_asin_pop_e + ped_pop$mg5_asin_pop_e)
+ped_pop$f_asin_pop <- as.numeric(ped_pop$fg1_asin_pop_e + ped_pop$fg2_asin_pop_e + ped_pop$fg3_asin_pop_e +
+                                 ped_pop$fg4_asin_pop_e + ped_pop$fg5_asin_pop_e)
+
+##Alaska
+ped_pop$m_alask_pop <- as.numeric(ped_pop$mg1_alask_pop_e + ped_pop$mg2_alask_pop_e + ped_pop$mg3_alask_pop_e +
+                                  ped_pop$mg4_alask_pop_e + ped_pop$mg5_alask_pop_e)
+ped_pop$f_alask_pop <- as.numeric(ped_pop$fg1_alask_pop_e + ped_pop$fg2_alask_pop_e + ped_pop$fg3_alask_pop_e +
+                                  ped_pop$fg4_alask_pop_e + ped_pop$fg5_alask_pop_e)
+
+##Hawaiian and Pacific Islander
+ped_pop$m_haw_pacf_is_pop <- as.numeric(ped_pop$mg1_haw_pacf_is_pop_e + ped_pop$mg2_haw_pacf_is_pop_e + ped_pop$mg3_haw_pacf_is_pop_e +
+                                  ped_pop$mg4_haw_pacf_is_pop_e + ped_pop$mg5_haw_pacf_is_pop_e)
+ped_pop$f_haw_pacf_is_pop <- as.numeric(ped_pop$fg1_haw_pacf_is_pop_e + ped_pop$fg2_haw_pacf_is_pop_e + ped_pop$fg3_haw_pacf_is_pop_e +
+                                  ped_pop$fg4_haw_pacf_is_pop_e + ped_pop$fg5_haw_pacf_is_pop_e)
+
+
+#health insurance
+ped_pop$m_ins_cnt<-as.numeric(ped_pop$no_hel_ins_mu6e+ped_pop$no_hel_ins_m6_18e)
+ped_pop$f_ins_cnt<-as.numeric(ped_pop$no_hel_ins_fu6e+ped_pop$no_hel_ins_f6_18e)
+
+#single parent
+ped_pop$sing_prnt_cnt<- as.numeric(ped_pop$sing_prnt_u6e+ped_pop$sing_prnt_6_17e)
+```
+
+#filter data with variables of interest
+```{r}
+pop_df<- ped_pop |>
+  select(c("geoid", "name",
+           "m_pop", "f_pop",
+           "m_blk_pop", "f_blk_pop", 
+           "m_hisp_pop", "f_hisp_pop",
+           "m_asin_pop", "f_asin_pop",
+           "m_alask_pop", "f_alask_pop",
+           "m_haw_pacf_is_pop", "f_haw_pacf_is_pop",
+           "m_ins_cnt", "f_ins_cnt",
+           "sing_prnt_cnt",
+           "poverty_e",
+           "ssi_snap_e",
+           "total_un_empl_hsb_e",
+           "education_e",
+           "langu_e",
+           "no_vehic_e",
+           "foregin_born_e",
+           "median_incom_e",
+           "households",
+           "hous_w_pedpop_e",
+           "hous_wo_pedpop_e",
+           "total_pop_e",
+           "geometry"
+           )) |>
+  mutate(blk_pop = m_blk_pop+f_blk_pop,
+         hisp_pop = m_hisp_pop+f_hisp_pop,
+         asin_pop = m_asin_pop+f_asin_pop,
+         alask_pacf_isl =m_alask_pop+f_alask_pop+m_haw_pacf_is_pop+f_haw_pacf_is_pop,
+         ins_cnt = m_ins_cnt+f_ins_cnt)|>
+  mutate(blk_pct = sprintf("%.2f", (blk_pop / (m_pop + f_pop)) * 100),
+       hisp_pct = sprintf("%.2f", (hisp_pop / (m_pop + f_pop)) * 100),
+       asin_pct = sprintf("%.2f", (asin_pop / (m_pop + f_pop)) * 100),
+       alask_pacf_isl_pct = sprintf("%.2f", (alask_pacf_isl / (m_pop + f_pop)) * 100),
+       ins_pct = sprintf("%.2f", (ins_cnt / (m_pop + f_pop)) * 100),
+       no_vehic = sprintf("%.2f", (no_vehic_e / households) * 100),
+       ssi_snap_pct = sprintf("%.2f", (ssi_snap_e / hous_w_pedpop_e) * 100),
+       poverty_pct = sprintf("%.2f", (poverty_e / households) * 100),
+       un_empl_pct = sprintf("%.2f", (total_un_empl_hsb_e / households) * 100),
+       langu_pct = sprintf("%.2f", (langu_e / (m_pop + f_pop)) * 100),
+       foregin_born_pct = sprintf("%.2f", (foregin_born_e / total_pop_e) * 100),
+       sing_prnt_pct = sprintf("%.2f", (sing_prnt_cnt / (m_pop + f_pop)) * 100),
+       median_incom = sprintf("%.2f", (median_incom_e / households) * 100)) |>
+  select(c("geoid", "name", "geometry",
+           "blk_pct", "hisp_pct", "asin_pct", "alask_pacf_isl_pct",
+           "ins_pct", 
+           "ssi_snap_pct", "poverty_pct", "un_empl_pct", "langu_pct",
+           "foregin_born_pct", "sing_prnt_pct", "no_vehic")) |>
+  mutate_at(vars(4:15), as.numeric) |>
+  mutate_at(vars(4:15), ~replace_na(., 0)) |>
+  mutate_at(vars(4:15), ~{
+    percentile_90 <- quantile(., 0.9, na.rm = TRUE)
+    replace(., . > 98 | is.infinite(.), percentile_90)
+  })
+```
+
+#export vulnerability file
+```{r}
+save(pop_df, file = "~/Documents/extreme_heat_cc/data/acs_data_extract.RDA")
+```
+
+
+```{r}
+pa_tracts <- tracts(state = "PA")
+nj_tracts <- tracts(state = "NJ")
+de_tracts <- tracts(state = "DE")
+
+# Combine the three state shapefiles
+combined_tracts <- rbind(pa_tracts, nj_tracts, de_tracts) |> 
+  clean_names() |>
+  as_tibble()
+
+dat_fin <- right_join(combined_tracts, pop_df, by = "geoid")
+```
+
+#export data
+```{r}
+save(dat_fin, file="~/Documents/extreme_heat_cc/data/SDOH_final.RDA")
+```
+
