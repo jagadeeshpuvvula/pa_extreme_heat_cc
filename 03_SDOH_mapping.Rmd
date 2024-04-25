@@ -62,7 +62,7 @@ ggplot() +
         strip.text = element_text(size = 12, face = "bold", angle = 0, hjust = 0.5),
         strip.background = element_blank()) 
 
-ggsave("~/Documents/extreme_heat_cc/data/maps_prelim_consl.pdf", 
+ggsave("~/Documents/extreme_heat_cc/results/sdoh_maps.pdf", 
        width = 16,height = 10,
        dpi=300)
 ```
