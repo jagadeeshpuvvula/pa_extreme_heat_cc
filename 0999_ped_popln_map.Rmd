@@ -1,0 +1,115 @@
+---
+title: "0999_ped_popln_map"
+author: "Puvvula"
+date: "2023-11-07"
+output: pdf_document
+---
+
+
+```{r}
+library(pacman)
+p_load(tidyverse, tidycensus, janitor, sf, tigris, viridis)
+```
+
+```{r}
+# Fetch population data for the total population and pediatric population
+population_data <- get_acs(
+  geography = "tract",
+  variables = c("B01001A_002", "B01001A_017", "B01001A_003", "B01001A_004", "B01001A_005", "B01001A_006", "B01001A_007", "B01001A_018", "B01001A_019", "B01001A_020", "B01001A_021", "B01001A_022"),
+  state = c("PA", "NJ", "DE"),
+  geometry = TRUE,
+  output = "wide"
+) 
+
+```
+
+```{r}
+# Calculate the total population by summing "B01001A_002" and "B01001A_017"
+population_data <- population_data |>
+  mutate(total_population = B01001A_002E + B01001A_017E,
+         pediatric_population = B01001A_003E + B01001A_004E + B01001A_005E + B01001A_006E + 
+           B01001A_007E + B01001A_018E + B01001A_019E + B01001A_020E + B01001A_021E + B01001A_022E,
+         pediatric_percentage = (pediatric_population / total_population) * 100) |>
+  select(GEOID, NAME, pediatric_percentage, geometry)
+
+```
+
+```{r}
+ggplot() +
+  geom_sf(data = population_data, aes(fill = pediatric_percentage)) +
+  scale_fill_viridis(name = "Pediatric Percentage", 
+                     breaks=quantile(population_data$pediatric_percentage, 
+                                    probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = TRUE)) +
+  theme_void()
+```
+
+```{r}
+# Replace NA values with 0 in the "pediatric_percentage" variable
+population_data$pediatric_percentage[is.na(population_data$pediatric_percentage)] <- 0
+
+
+breaks <- quantile(population_data$pediatric_percentage, probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = TRUE)
+
+# Define custom labels for the breaks (without brackets)
+labels <- c("0-16(Q1)", "17-20(Q2)", "21-24(Q3)", "25-78(Q4)")
+
+# Create a custom color palette for the categories
+color_palette <- viridis::viridis(4)
+
+# Plot the pediatric percentage as a choropleth map with custom breaks and labels
+ggplot() +
+  geom_sf(data = population_data, aes(fill = cut(pediatric_percentage, breaks = breaks)),
+          lwd=0)+
+  scale_fill_manual(name = "Fraction of pediatric population", 
+                    values = color_palette, drop = FALSE, 
+                    labels = labels) +
+  theme_void() +
+  theme(legend.position = c(0.35, 0.2), legend.direction = "horizontal") +
+  guides(fill = guide_legend(nrow = 3))
+```
+
+########### climate change viz
+```{r}
+pa_df<- read_csv("~/Documents/extr_heat_proposal/pa_tmax_dcp.csv") |>
+  mutate(
+    date = ym(date),         # Convert 'date' to Date format
+    scenario = as.factor(scenario),   # Convert 'scenario' to a factor
+    model = as.factor(model),         # Convert 'model' to a factor
+    max = (max - 273.15)          # Convert 'mean' from Kelvin to Celsius
+  )
+```
+
+```{r}
+df<- pa_df |>
+  mutate(year = lubridate::year(date),  # Extract the year from the 'date' column
+         month = lubridate::month(date)) |>
+  group_by(model, scenario, year) |>
+  summarize(max = mean(max, na.rm = TRUE)) |>
+  filter(model=="ACCESS1-0",
+         year < 2006 | year > 2030) |>
+  mutate(time_line = ifelse(scenario == "historical", "Historical", "Future"),
+         time_line = factor(time_line, levels = c("Historical", "Future")))
+
+
+
+ggplot(df, aes(x = year, y = max, color=scenario)) +
+  geom_point(size=0.5) +
+  geom_smooth(method = "gam",formula = y ~ s(x, k=5, bs = "cs"),
+              se = FALSE, size = 1)+
+  labs(title = "",
+       x = "Year",
+       y = "Annual mean of \nmonthly maximum Temperature (°C)",
+       caption = "Plot generated using the Australian Community Climate and Earth System Simulator - ACCESS 1.0 GCM simulation") +
+  scale_x_continuous(breaks = seq(min(df$year), max(df$year), by = 5))+
+  facet_wrap(.~time_line, scales="free_x")+
+  theme_minimal()+
+  theme(
+    panel.grid.minor = element_blank(),
+    legend.position = "bottom",
+    legend.justification = "center",
+    plot.caption = element_text(hjust = 1),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+
