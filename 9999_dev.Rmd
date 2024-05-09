@@ -24,6 +24,5 @@ train_val_test_split <- function(df,
   test <- df[indices_test, ]
   list(train, val, test)
 }
-
 ```
 
