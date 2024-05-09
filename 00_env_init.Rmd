@@ -9,6 +9,12 @@ output: pdf_document
 library(pacman)
 pacman::p_load(tidyverse, tidycensus, janitor, sf, tigris, viridis, reshape2, 
                knitr, factoextra, ggfortify, gridExtra, factoextra, ggcorrplot,
-               knitr, keras3)
+               knitr, keras, Rtsne, GPArotation, psych)
+```
+
+directories
+```{r}
+data_path <- "D:/cc_vulnerability/data/"
+result_path <- "D:/cc_vulnerability/results/"
 ```
 
