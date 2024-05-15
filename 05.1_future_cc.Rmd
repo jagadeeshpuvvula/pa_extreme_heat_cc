@@ -1,0 +1,30 @@
+---
+title: "05.1_future_cc"
+author: "Puvvula"
+date: "2024-05-15"
+output: pdf_document
+---
+
+```{r}
+mid_cen_cc <- raster("~/Documents/extreme_heat_cc/data/box_cc_files/Climate_outputs/midcentury_delta.tif")
+late_cen_cc <- raster("~/Documents/extreme_heat_cc/data/box_cc_files/Climate_outputs/latecentury_delta.tif")
+
+extr_heat <- raster("~/Documents/extreme_heat_cc/data/box_cc_files/Extreme_Heat_outputs/Monthly_outputs/AllSummer20122022.tif")
+```
+
+```{r}
+raster_df <- as.data.frame(extr_heat, xy = TRUE)
+```
+
+
+prelim plot
+```{r}
+ggplot()+
+  geom_raster(data = raster_df, aes(x = x, y = y, fill = LST_Day_1km))+
+  scale_fill_viridis(option="F") +
+  scale_y_continuous(breaks = seq(0, 600, by = 100),
+                     labels = seq(0, 600, by = 100))+
+  theme_void() +
+  theme(legend.position = "bottom")
+```
+
