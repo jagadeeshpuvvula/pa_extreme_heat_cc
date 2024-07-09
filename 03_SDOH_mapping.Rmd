@@ -13,7 +13,7 @@ state_shp<- states(cb=F) |>
 
 #read processed SDOH data
 ```{r}
-load("~/Documents/extreme_heat_cc/data/SDOH_final.RDA")
+load(paste0(data_path, "SDOH_final.RDA"))
 ```
 
 #long formatting
@@ -62,7 +62,7 @@ ggplot() +
         strip.text = element_text(size = 12, face = "bold", angle = 0, hjust = 0.5),
         strip.background = element_blank()) 
 
-ggsave("~/Documents/extreme_heat_cc/results/sdoh_maps.pdf", 
+ggsave(paste0(result_path, "sdoh_maps_tif.tiff"), 
        width = 16,height = 10,
        dpi=300)
 ```

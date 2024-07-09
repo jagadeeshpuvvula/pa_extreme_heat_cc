@@ -13,12 +13,24 @@ extr_heat <- raster("~/Documents/extreme_heat_cc/data/box_cc_files/Extreme_Heat_
 ```
 
 ```{r}
+<<<<<<< HEAD
 raster_df <- as.data.frame(extr_heat, xy = TRUE)
+=======
+#extreme_heat
+extr_heat_df <- as.data.frame(extr_heat, xy = TRUE)
+
+#2030-2064
+mid_cen_cc_df <- as.data.frame(mid_cen_cc, xy = TRUE)
+
+#2065-2099
+late_cen_cc_df <- as.data.frame(late_cen_cc, xy = TRUE)
+>>>>>>> 51ccbe4763f6b3361bef570f9408bce291188958
 ```
 
 
 prelim plot
 ```{r}
+<<<<<<< HEAD
 ggplot()+
   geom_raster(data = raster_df, aes(x = x, y = y, fill = LST_Day_1km))+
   scale_fill_viridis(option="F") +
@@ -26,5 +38,16 @@ ggplot()+
                      labels = seq(0, 600, by = 100))+
   theme_void() +
   theme(legend.position = "bottom")
+=======
+#LST_Day_1km
+#tasmax_median
+
+ggplot()+
+  geom_raster(data = extr_heat_df, aes(x = x, y = y, fill = LST_Day_1km))+
+  scale_fill_viridis(option="F") +
+  theme_void() +
+  theme(legend.position = "bottom")
+
+>>>>>>> 51ccbe4763f6b3361bef570f9408bce291188958
 ```
 
