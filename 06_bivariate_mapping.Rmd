@@ -1,0 +1,140 @@
+---
+title: "06_bivariate_map"
+author: "Puvvula"
+date: "2024-07-09"
+output: pdf_document
+---
+
+```{r}
+vul_index <- read_csv("~/Documents/extreme_heat_cc/results/final_all_indicies.csv") |>
+  mutate(geoid = as.character(geoid),
+         pca_indx1 = pca_indx1*-1,
+         tsne_indx1 = tsne_indx1*-1,
+         pca_indx1_category = cut(pca_indx1,
+                                  breaks = quantile(pca_indx1, probs = c(0, 0.33, 0.66, 1), na.rm = TRUE),
+                                  labels = c("Low (< 33rd percentile)",
+                                             "Medium (33rd - 66th percentile)",
+                                             "High (> 66th percentile)"),
+                                  include.lowest = TRUE),
+         fa_indx1_category = cut(fa_indx1,
+                                 breaks = quantile(fa_indx1, probs = c(0, 0.33, 0.66, 1), na.rm = TRUE),
+                                 labels = c("Low (< 33rd percentile)",
+                                            "Medium (33rd - 66th percentile)",
+                                            "High (> 66th percentile)"),
+                                 include.lowest = TRUE),
+         tsne_indx1_category = cut(tsne_indx1,
+                                   breaks = quantile(tsne_indx1, probs = c(0, 0.33, 0.66, 1), na.rm = TRUE),
+                                   labels = c("Low (< 33rd percentile)",
+                                              "Medium (33rd - 66th percentile)",
+                                              "High (> 66th percentile)"),
+                                   include.lowest = TRUE)
+         )
+```
+
+#State and County shape file
+```{r}
+cnty_shp<- map_dfr(c("PA", "NJ", "DE"), ~{
+  tracts(.x, cb = TRUE, year = 2020)}) |>
+  clean_names()
+
+state_shp<- states(cb=F) |>
+  filter(STUSPS %in% c("PA", "NJ", "DE"))
+```
+
+#join pediatric indicies and county shapefile
+```{r}
+vul_index_shp<- left_join(cnty_shp, vul_index, by = "geoid")
+```
+
+#3d plotting
+```{r}
+plot_ly(vul_index_shp, 
+        x=vul_index_shp$pca_indx1, 
+        y=vul_index_shp$tsne_indx1, 
+        z=vul_index_shp$umap_indx1, 
+        color = vul_index_shp$ruca_category, 
+        shape = vul_index_shp$state_name,
+        type="scatter3d", 
+        mode="markers")
+```
+
+#Tristate cities
+```{r}
+cities <- data.frame(
+  city = c("Philadelphia", "Pittsburgh", "Allentown", "Trenton", "Newark", "Wilmington", "Harrisburg", "Lancaster", "Scranton"),
+  state = c("PA", "PA", "PA", "NJ", "NJ", "DE", "PA", "PA", "PA"),
+  x = c(-75.1652, -79.9959, -75.4780, -74.7429, -74.1724, -75.5398, -76.8844, -76.3055, -75.6649),
+  y = c(39.9526, 40.4406, 40.6084, 40.2171, 40.7357, 39.7391, 40.2732, 40.0379, 41.4089)
+  )
+```
+
+
+```{r}
+ruca_df<- read_csv("~/Documents/extreme_heat_cc/data/ruca_cnty.csv") |> 
+  clean_names() |>
+  mutate(ruca_category = case_when(
+    primary_ruca_code_2010 %in% 1:3 ~ "Metropolitan",
+    primary_ruca_code_2010 %in% 4:6 ~ "Micropolitan",
+    primary_ruca_code_2010 %in% 7:9 ~ "Small_town",
+    primary_ruca_code_2010 == 10 ~ "Rural_area",
+    primary_ruca_code_2010 == 99 ~ "NA",
+    TRUE ~ "NA"  # This covers any unexpected values
+    ))
+```
+
+#Read bivariate TIFF files
+```{r}
+bivariate_raster <- brick("~/Documents/extreme_heat_cc/data/box_cc_files/Pediatric_risk_index_Extremeheat_PCA1.tif")
+```
+
+```{r}
+bivariate_raster_df <- as.data.frame(bivariate_raster, xy = TRUE) |>
+  filter(Pediatric_risk_index_Extremeheat_PCA1_1 != 0 & LST_Day_1km != 0) |>
+  bi_class(x=Pediatric_risk_index_Extremeheat_PCA1_1, 
+           y=LST_Day_1km,
+           style = "quantile",
+           dim = 4)
+```
+
+
+```{r}
+# Define the point to zoom into
+zoom_buffer <- 0.1
+zoom_y <- 39.9526
+zoom_x <- -75.1652
+```
+
+#bivariate plotting
+```{r}
+map<- ggplot()+
+    geom_raster(data = bivariate_raster_df, aes(x = x, y = y, fill = bi_class), show.legend = F)+
+    geom_sf(data = state_shp, aes(geometry = geometry), fill= NA, color = "white", size = 10,  show.legend = F)+
+    geom_point(data = cities, aes(x = x, y = y), color = "yellow", size = 3,  show.legend = F) +
+    labs(x = NULL, y = NULL)+
+    bi_scale_fill(pal = "GrPink2", dim = 4)+
+    theme_void() +
+    theme(legend.position = "none")+
+    bi_theme()+
+    coord_sf(xlim = c(zoom_x - zoom_buffer, zoom_x + zoom_buffer), ylim = c(zoom_y - zoom_buffer, zoom_y + zoom_buffer))
+
+
+legend <- bi_legend(pal = "GrPink2",
+                    dim = 4,
+                    xlab = "Pediatric vulnerability",
+                    ylab = "Extreme temperature",
+                    size = 10)
+
+map_fin<- ggdraw() +
+    draw_plot(map, 0, 0, 1, 1) +
+    draw_plot(legend, 0.125, 0.1, 0.2, 0.2)
+```
+
+```{r}
+ggsave(map_fin,
+       file="~/Documents/extreme_heat_cc/results/bivariate_map_pca1_heat.tiff",
+       width = 14,height = 10,
+       dpi=450)
+```
+
+
+
