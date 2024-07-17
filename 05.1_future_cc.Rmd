@@ -13,9 +13,11 @@ extr_heat <- raster("~/Documents/extreme_heat_cc/data/box_cc_files/Extreme_Heat_
 ```
 
 ```{r}
-#extreme_heat
+#extreme_heat - total days = 1,100 (June 1st - August 31 over 2012 to 2022)
 extr_heat_df <- as.data.frame(extr_heat, xy = TRUE) |>
-  filter(LST_Day_1km != 0) 
+  rename(ext_ht_cnt = COTUSSummerAll2) |>
+  filter(ext_ht_cnt != 0)
+  
 
 #2030-2064
 mid_cen_cc_df <- as.data.frame(mid_cen_cc, xy = TRUE)
@@ -25,6 +27,30 @@ late_cen_cc_df <- as.data.frame(late_cen_cc, xy = TRUE)
 
 ```
 
+```{r}
+state_shp<- states(cb=F) |>
+  filter(!STUSPS %in% c("AK", "HI", "GU", "VI", "MP", "AS", "PR"))
+
+cities <- data.frame(
+  city = c("New York", "Los Angeles", "Chicago", "Houston", "Phoenix", "Philadelphia", 
+           "San Antonio", "San Diego", "Dallas", "San Jose", "Austin", "Jacksonville", 
+           "Fort Worth", "Columbus", "Charlotte", "San Francisco", "Indianapolis", "Seattle", 
+           "Denver", "Washington"),
+  state = c("NY", "CA", "IL", "TX", "AZ", "PA", 
+            "TX", "CA", "TX", "CA", "TX", "FL", 
+            "TX", "OH", "NC", "CA", "IN", "WA", 
+            "CO", "DC"),
+  x = c(-74.0060, -118.2437, -87.6298, -95.3698, -112.0740, -75.1652, 
+        -98.4936, -117.1611, -96.7970, -121.8863, -97.7431, -81.6557, 
+        -97.3327, -82.9988, -80.8431, -122.4194, -86.1581, -122.3321, 
+        -104.9903, -77.0369),
+  y = c(40.7128, 34.0522, 41.8781, 29.7604, 33.4484, 39.9526, 
+        29.4241, 32.7157, 32.7767, 37.3382, 30.2672, 30.3322, 
+        32.7555, 39.9612, 35.2271, 37.7749, 39.7684, 47.6062, 
+        39.7392, 38.9072)
+)
+```
+
 
 prelim plot
 ```{r}
@@ -32,22 +58,22 @@ prelim plot
 #tasmax_median
 hotdays<- 
   ggplot()+
-  geom_raster(data = extr_heat_df, aes(x = x, y = y, fill = LST_Day_1km))+
+  geom_tile(data = extr_heat_df, aes(x = x, y = y, fill = ext_ht_cnt))+
   geom_sf(data = state_shp, aes(geometry = geometry), fill= NA, color = "white", size = 20,  show.legend = F)+
-  geom_point(data = cities, aes(x = x, y = y), color = "yellow", size = 3,  show.legend = F) +
+  geom_point(data = cities, aes(x = x, y = y), color = "yellow", size = 2,  show.legend = F) +
   scale_fill_viridis(option="A") +
   theme_void() +
   theme(legend.position = "bottom")+
   guides(fill = guide_colorbar("Frequency of hot days 2012-2022"))+
-  theme(legend.position = c(0.8, 0.2),  # Custom position (x, y)
+  theme(legend.position = c(0.7, 0.1),  # Custom position (x, y)
         legend.justification = c(2.4, 0),
         legend.direction = "horizontal")   # Anchor point (right, bottom)
 ```
 
 ```{r}
 ggsave(hotdays,
-       file="~/Documents/extreme_heat_cc/results/extreme_heat.tiff",
-       width = 12,height = 10,
+       file="~/Documents/extreme_heat_cc/results/extreme_heat_US.tiff",
+       width = 14,height = 10,
        dpi=600)
 ```
 
