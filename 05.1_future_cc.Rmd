@@ -6,10 +6,12 @@ output: pdf_document
 ---
 
 ```{r}
-mid_cen_cc <- raster("~/Documents/extreme_heat_cc/data/box_cc_files/Climate_outputs/midcentury_delta.tif")
-late_cen_cc <- raster("~/Documents/extreme_heat_cc/data/box_cc_files/Climate_outputs/latecentury_delta.tif")
+#future climate change
+mid_cen_cc <- raster("~/Documents/extreme_heat_cc/data/CONUS/future_cc/midcentury_delta_USA.tif")
+late_cen_cc <- raster("~/Documents/extreme_heat_cc/data/CONUS/future_cc/latecentury_delta_USA.tif")
 
-extr_heat <- raster("~/Documents/extreme_heat_cc/data/box_cc_files/Extreme_Heat_outputs/Monthly_outputs/AllSummer20122022.tif")
+#current climate change
+extr_heat <- raster("~/Documents/extreme_heat_cc/data/CONUS/current_cc/overall_trend.tif")
 ```
 
 ```{r}
@@ -20,10 +22,14 @@ extr_heat_df <- as.data.frame(extr_heat, xy = TRUE) |>
   
 
 #2030-2064
-mid_cen_cc_df <- as.data.frame(mid_cen_cc, xy = TRUE)
+mid_cen_cc_df <- as.data.frame(mid_cen_cc, xy = TRUE)|>
+  rename(mid_cen_delta = midcentury_delta_USA) |>
+  filter(mid_cen_delta != 0)
 
 #2065-2099
-late_cen_cc_df <- as.data.frame(late_cen_cc, xy = TRUE)
+late_cen_cc_df <- as.data.frame(late_cen_cc, xy = TRUE)|>
+  rename(late_cen_delta = latecentury_delta_USA) |>
+  filter(late_cen_delta != 0)
 
 ```
 
@@ -52,13 +58,13 @@ cities <- data.frame(
 ```
 
 
-prelim plot
+#prelim plots
+
+##current climate change
 ```{r}
-#LST_Day_1km
-#tasmax_median
-hotdays<- 
+current_cc<- 
   ggplot()+
-  geom_tile(data = extr_heat_df, aes(x = x, y = y, fill = ext_ht_cnt))+
+  geom_raster(data = extr_heat_df, aes(x = x, y = y, fill = ext_ht_cnt))+
   geom_sf(data = state_shp, aes(geometry = geometry), fill= NA, color = "white", size = 20,  show.legend = F)+
   geom_point(data = cities, aes(x = x, y = y), color = "yellow", size = 2,  show.legend = F) +
   scale_fill_viridis(option="A") +
@@ -71,8 +77,54 @@ hotdays<-
 ```
 
 ```{r}
-ggsave(hotdays,
-       file="~/Documents/extreme_heat_cc/results/extreme_heat_US.tiff",
+ggsave(current_cc,
+       file="~/Documents/extreme_heat_cc/results/CONUS/extreme_heat_US.tiff",
+       width = 14,height = 10,
+       dpi=100)
+```
+
+##Future climate change - Mid century (2030-2064)
+```{r}
+mid_century_delta<- 
+  ggplot()+
+  geom_raster(data = mid_cen_cc_df, aes(x = x, y = y, fill = mid_cen_delta))+
+  geom_sf(data = state_shp, aes(geometry = geometry), fill= NA, color = "white", size = 20,  show.legend = F)+
+  geom_point(data = cities, aes(x = x, y = y), color = "yellow", size = 2,  show.legend = F) +
+  scale_fill_viridis(option="A") +
+  theme_void() +
+  theme(legend.position = "bottom")+
+  guides(fill = guide_colorbar("Mid century \u0394 RCP8.5-RCP4.5"))+
+  theme(legend.position = c(0.7, 0.1),  # Custom position (x, y)
+        legend.justification = c(2.4, 0),
+        legend.direction = "horizontal")   # Anchor point (right, bottom)
+```
+
+```{r}
+ggsave(mid_century_delta,
+       file="~/Documents/extreme_heat_cc/results/CONUS/mid_cen_delta.tiff",
+       width = 14,height = 10,
+       dpi=100)
+```
+
+##Future climate change - Late Century (2065-2099)
+```{r}
+late_century_delta<- 
+  ggplot()+
+  geom_raster(data = late_cen_cc_df, aes(x = x, y = y, fill = late_cen_delta))+
+  geom_sf(data = state_shp, aes(geometry = geometry), fill= NA, color = "white", size = 20,  show.legend = F)+
+  geom_point(data = cities, aes(x = x, y = y), color = "yellow", size = 2,  show.legend = F) +
+  scale_fill_viridis(option="A") +
+  theme_void() +
+  theme(legend.position = "bottom")+
+  guides(fill = guide_colorbar("Late century \u0394 RCP8.5-RCP4.5"))+
+  theme(legend.position = c(0.7, 0.1),  # Custom position (x, y)
+        legend.justification = c(2.4, 0),
+        legend.direction = "horizontal")   # Anchor point (right, bottom)
+```
+
+```{r}
+ggsave(late_century_delta,
+       file="~/Documents/extreme_heat_cc/results/CONUS/late_cen_delta_hdef.tiff",
        width = 14,height = 10,
        dpi=600)
 ```
