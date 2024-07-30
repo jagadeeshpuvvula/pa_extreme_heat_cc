@@ -17,7 +17,7 @@ extr_heat <- raster("~/Documents/extreme_heat_cc/data/CONUS/current_cc/overall_t
 ```{r}
 #extreme_heat - total days = 1,100 (June 1st - August 31 over 2012 to 2022)
 extr_heat_df <- as.data.frame(extr_heat, xy = TRUE) |>
-  rename(ext_ht_cnt = COTUSSummerAll2) |>
+  rename(ext_ht_cnt = overall_trend) |>
   filter(ext_ht_cnt != 0)
   
 
@@ -75,6 +75,32 @@ current_cc<-
         legend.justification = c(2.4, 0),
         legend.direction = "horizontal")   # Anchor point (right, bottom)
 ```
+
+#city specific plots
+```{r}
+current_cc <-
+  ggplot() +
+  geom_raster(data = extr_heat_df, aes(x = x, y = y, fill = ext_ht_cnt)) +
+  geom_sf(data = state_shp, aes(geometry = geometry), fill = NA, color = "white", size = 0.5, show.legend = FALSE) +
+  geom_point(data = cities, aes(x = x, y = y), color = "yellow", size = 2, show.legend = FALSE) +
+  scale_fill_viridis(option = "A", limits = c(0, 600)) +
+  theme_void() +
+  guides(fill = guide_colorbar("Warming trend 2012-2022")) +
+  theme(legend.text = element_text(angle = 45),
+        legend.position = "bottom",
+        legend.justification = "center",
+        legend.direction = "horizontal",
+        plot.margin = unit(c(1, 1, 4, 1), "lines")  # Increase bottom margin for the legend
+        ) +
+  coord_sf(
+    xlim = c(-75.3, -75.0), 
+    ylim = c(39.8, 40.2)
+)
+
+# Draw the plot with the legend positioned outside at the bottom
+grid::grid.draw(current_cc + theme(legend.position = "bottom"))
+```
+
 
 ```{r}
 ggsave(current_cc,
