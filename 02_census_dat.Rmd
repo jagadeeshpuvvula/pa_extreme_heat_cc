@@ -13,7 +13,13 @@ var_df<- load_variables(2021, "acs5", cache = TRUE) |> filter(geography=="tract"
 #Extracting variables from 2017-2021 US Census API
 ```{r}
 ped_pop_tract <- get_acs(geography = "tract", #census block group
-                  state = c("PA", "NJ", "DE"),
+                  #state = c("PA", "NJ", "DE"),
+                  state = c("AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", 
+                            "GA", "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", 
+                            "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", 
+                            "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK", 
+                            "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", 
+                            "VA", "WA", "WV", "WI", "WY", "DC"),
                   year=2021,
                   survey = "acs5",
                   variables=c(mg1_pop= "B01001_003",mg2_pop= "B01001_004",mg3_pop= "B01001_005",mg4_pop= "B01001_006",mg5_pop= "B01001_007",
@@ -58,18 +64,28 @@ ped_pop_tract <- get_acs(geography = "tract", #census block group
                               total_pop = "B01001A_001"),
                   geometry = T,
                   output = "wide") %>% clean_names()
+
+write_csv(ped_pop_tract, "~/Documents/extreme_heat_cc/mansc_data/ped_pop_tract.csv")
 ```
 
 #extracting variables at blockgroup
 ```{r}
 ped_pop_blk_grp<- get_acs(geography = "block group", 
-                  state = c("PA", "NJ", "DE"),
+                  state = c("AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", 
+                            "GA", "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", 
+                            "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", 
+                            "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK", 
+                            "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", 
+                            "VA", "WA", "WV", "WI", "WY", "DC"),
                   year=2021,
                   survey = "acs5",
-                  variables=c(un_empl_hsb="B23007_010"),
+                  variables=c(un_empl_hsb="B23007_010",
+                              un_empl_wife="B23007_013"),
                   geometry = T,
                   output = "wide") %>% clean_names() |>
-  select(c("name", "un_empl_hsb_e")) 
+  select(c("name", "un_empl_hsb_e", "un_empl_wife_e")) |>
+  mutate(unempl = un_empl_hsb_e+un_empl_wife_e) |>
+  select(c("name", "unempl"))
 
 #aggregating block group level data to tract level
 ped_pop_blk_grp_aggr <- ped_pop_blk_grp |>
@@ -79,12 +95,18 @@ ped_pop_blk_grp_aggr <- ped_pop_blk_grp |>
   as_tibble() |>
   select(-c("geometry")) |>
   group_by(name) |>
-  summarize(total_un_empl_hsb_e = sum(un_empl_hsb_e))
+  summarize(total_un_empl = sum(unempl))
+
+write_csv(ped_pop_blk_grp_aggr, "~/Documents/extreme_heat_cc/mansc_data/un_empl_tract.csv")
 ```
 
 #join unemployment with other census tract level data
 ```{r}
+ped_pop_tract<- read_csv("~/Documents/extreme_heat_cc/mansc_data/ped_pop_tract.csv")
+ped_pop_blk_grp_aggr<- read_csv("~/Documents/extreme_heat_cc/mansc_data/un_empl_tract.csv")
+
 ped_pop<- left_join(ped_pop_tract, ped_pop_blk_grp_aggr, by="name")
+rm(ped_pop_blk_grp_aggr, ped_pop_tract)
 ```
 
 #aggregating age groups to represent pediatric population
@@ -151,7 +173,7 @@ pop_df<- ped_pop |>
            "sing_prnt_cnt",
            "poverty_e",
            "ssi_snap_e",
-           "total_un_empl_hsb_e",
+           "total_un_empl",
            "education_e",
            "langu_e",
            "no_vehic_e",
@@ -173,13 +195,16 @@ pop_df<- ped_pop |>
        asin_pct = sprintf("%.2f", (asin_pop / (m_pop + f_pop)) * 100),
        alask_pacf_isl_pct = sprintf("%.2f", (alask_pacf_isl / (m_pop + f_pop)) * 100),
        ins_pct = sprintf("%.2f", (ins_cnt / (m_pop + f_pop)) * 100),
+       
        no_vehic = sprintf("%.2f", (no_vehic_e / households) * 100),
        ssi_snap_pct = sprintf("%.2f", (ssi_snap_e / hous_w_pedpop_e) * 100),
        poverty_pct = sprintf("%.2f", (poverty_e / households) * 100),
-       un_empl_pct = sprintf("%.2f", (total_un_empl_hsb_e / households) * 100),
+       un_empl_pct = sprintf("%.2f", (total_un_empl / (m_pop + f_pop)) * 100),
+       
        langu_pct = sprintf("%.2f", (langu_e / (m_pop + f_pop)) * 100),
        foregin_born_pct = sprintf("%.2f", (foregin_born_e / total_pop_e) * 100),
        sing_prnt_pct = sprintf("%.2f", (sing_prnt_cnt / (m_pop + f_pop)) * 100),
+       
        median_incom = sprintf("%.2f", (median_incom_e / households) * 100)) |>
   select(c("geoid", "name", "geometry",
            "blk_pct", "hisp_pct", "asin_pct", "alask_pacf_isl_pct",
@@ -196,25 +221,39 @@ pop_df<- ped_pop |>
 
 #export vulnerability file
 ```{r}
-save(pop_df, file = "~/Documents/extreme_heat_cc/data/acs_data_extract.RDA")
+save(pop_df, file = "~/Documents/extreme_heat_cc/mansc_data/acs_data_extract.RDA")
 ```
 
 
 ```{r}
-pa_tracts <- tracts(state = "PA")
-nj_tracts <- tracts(state = "NJ")
-de_tracts <- tracts(state = "DE")
+states <- c("AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", 
+            "GA", "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", 
+            "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", 
+            "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK", 
+            "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", 
+            "VA", "WA", "WV", "WI", "WY", "DC")
 
-# Combine the three state shapefiles
-combined_tracts <- rbind(pa_tracts, nj_tracts, de_tracts) |> 
+# Initialize an empty list to store results
+us_tracts_list <- list()
+
+# Loop through each state and retrieve data
+for (state in states) {
+  state_data <- tracts(state = state, year = 2021) |> 
+    clean_names() |> 
+    as_tibble()
+  us_tracts_list[[state]] <- state_data
+}
+
+# Combine all state data into a single tibble
+us_tracts <- bind_rows(us_tracts_list) |> 
   clean_names() |>
   as_tibble()
 
-dat_fin <- right_join(combined_tracts, pop_df, by = "geoid")
+dat_fin <- right_join(us_tracts, pop_df, by = "geoid")
 ```
 
 #export data
 ```{r}
-save(dat_fin, file="~/Documents/extreme_heat_cc/data/SDOH_final.RDA")
+save(dat_fin, file="~/Documents/extreme_heat_cc/mansc_data/SDOH_final.RDA")
 ```
 
