@@ -12,12 +12,20 @@ late_cen_cc <- raster("~/Documents/extreme_heat_cc/data/CONUS/future_cc/latecent
 
 #current climate change
 extr_heat <- raster("~/Documents/extreme_heat_cc/data/CONUS/current_cc/overall_trend.tif")
+
+#NOAA-reference file
+noaa_extr_heat <- raster("~/Documents/extreme_heat_cc/data/CONUS/NOAA_ref/USASummer_NOAA.tif")
 ```
 
 ```{r}
 #extreme_heat - total days = 1,100 (June 1st - August 31 over 2012 to 2022)
 extr_heat_df <- as.data.frame(extr_heat, xy = TRUE) |>
   rename(ext_ht_cnt = overall_trend) |>
+  filter(ext_ht_cnt != 0)
+
+#NOAA reference file - total days = 1,100 (June 1st - August 31 over 2012 to 2022)
+noaa_extr_heat_df <- as.data.frame(noaa_extr_heat, xy = TRUE) |>
+  rename(ext_ht_cnt = USASummer_NOAA) |>
   filter(ext_ht_cnt != 0)
   
 
@@ -71,7 +79,7 @@ current_cc<-
   theme_void() +
   theme(legend.position = "bottom")+
   guides(fill = guide_colorbar("Frequency of hot days 2012-2022"))+
-  theme(legend.position = c(0.7, 0.1),  # Custom position (x, y)
+  theme(legend.position.inside = c(0.7, 0.1),  # Custom position (x, y)
         legend.justification = c(2.4, 0),
         legend.direction = "horizontal")   # Anchor point (right, bottom)
 ```
