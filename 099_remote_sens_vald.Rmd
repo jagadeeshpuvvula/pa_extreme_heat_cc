@@ -62,7 +62,7 @@ sample_raster_points <- function(raster1, raster2, n = 20000) {
 ```{r}
 remote_sens_vald <- sample_raster_points(extr_heat, noaa_extr_heat)
 
-
+write_csv(remote_sens_vald, "~/Documents/extreme_heat_cc/data/CONUS/remote_sens_validation.csv")
 ```
 
 #plot these locations
@@ -76,8 +76,11 @@ ggplot(remote_sens_vald, aes(x = x, y = y)) +
 
 #spearman correlation coefficients
 ```{r}
-df_cor<- remote_sens_vald |> filter(region == "northeast")
-cor.test(df_cor$overall_trend, df_cor$USASummer_NOAA, method = "spearman")
+cor.test(remote_sens_vald$overall_trend, remote_sens_vald$USASummer_NOAA, method = "spearman")
+
+remote_sens_vald  |>
+  group_by(region)  |>
+  do(tidy(cor.test(.$overall_trend, .$USASummer_NOAA, method = "spearman"))) 
 ```
 
 
