@@ -1,0 +1,95 @@
+---
+title: "099_remote_sens_vald"
+author: "Puvvula"
+date: "2024-08-16"
+output: pdf_document
+---
+
+```{r}
+#current climate change
+extr_heat <- raster("~/Documents/extreme_heat_cc/data/CONUS/current_cc/overall_trend.tif")
+
+#NOAA-reference file
+noaa_extr_heat <- raster("~/Documents/extreme_heat_cc/data/CONUS/NOAA_ref/USASummer_NOAA.tif")
+```
+
+#function to select random data points
+```{r}
+sample_raster_points <- function(raster1, raster2, n = 20000) {
+    
+    # Define non-overlapping regions
+    regions <- list(
+        "northeast" = extent(-100, -65, 37, 50),
+        "southeast" = extent(-100, -65, 25, 37),
+        "northwest" = extent(-125, -100, 37, 50),
+        "southwest" = extent(-125, -100, 25, 37)
+    )
+    
+    # Initialize a list to store results
+    results <- list()
+    
+    # Loop through each region
+    for (region in names(regions)) {
+        # Crop the rasters to the region
+        raster1_region <- crop(raster1, regions[[region]])
+        raster2_region <- crop(raster2, regions[[region]])
+        
+        # Sample random points within the region
+        sample_points <- sampleRandom(raster1_region, size = n, xy = TRUE) %>%
+            as.data.frame()
+        
+        # Assign correct name to the first raster values
+        names(sample_points)[3] <- names(raster1)
+        
+        # Extract corresponding values from the second raster
+        sample_points[[names(raster2)]] <- extract(raster2_region, sample_points[, c("x", "y")])
+        
+        # Add region label
+        sample_points$region <- region
+        
+        # Store results
+        results[[region]] <- sample_points
+    }
+    
+    # Combine all regions into one dataframe
+    result_df <- bind_rows(results)
+    
+    return(result_df)
+}
+```
+
+#get values and save data
+```{r}
+remote_sens_vald <- sample_raster_points(extr_heat, noaa_extr_heat)
+
+
+```
+
+#plot these locations
+```{r}
+ggplot(remote_sens_vald, aes(x = x, y = y)) +
+  geom_point(aes(color = region), size=0.0005) +
+  theme_void()+
+  theme(legend.position = "bottom", legend.box = "horizontal", legend.box.margin = margin(0, 0, 0, 0))+
+  guides(color = guide_legend(override.aes = list(shape = 15, size = 5)))
+```
+
+#spearman correlation coefficients
+```{r}
+df_cor<- remote_sens_vald |> filter(region == "northeast")
+cor.test(df_cor$overall_trend, df_cor$USASummer_NOAA, method = "spearman")
+```
+
+
+
+#scatter plot
+```{r}
+ggplot(remote_sens_vald, aes(x=overall_trend, y= USASummer_NOAA))+
+  geom_point(size=0.5, aplha=0.05, color="gray50")+
+  geom_smooth(method = lm, se=FALSE, fullrange= TRUE)+
+  #facet_wrap(vars(region), nrow=2, scales = "free", axis.labels = "all_y")+
+  theme_minimal()+
+  labs(x= "Remote sensing observations",
+       y= "NOAA observations")
+```
+
