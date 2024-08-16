@@ -8,12 +8,17 @@ output: pdf_document
 #get state boundaries
 ```{r}
 state_shp<- states(cb=F) |>
-  filter(STUSPS %in% c("PA", "NJ", "DE"))
+  filter(STUSPS %in% c("AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", 
+            "GA", "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", 
+            "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", 
+            "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK", 
+            "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", 
+            "VA", "WA", "WV", "WI", "WY", "DC"))
 ```
 
 #read processed SDOH data
 ```{r}
-load(paste0(data_path, "SDOH_final.RDA"))
+load(paste0(direc, "SDOH_final.RDA"))
 ```
 
 #long formatting
@@ -36,6 +41,17 @@ dat_fin_long <- dat_fin |>
   pivot_longer(cols = -geometry.x, names_to = "variable", values_to = "value")
 ```
 
+#create boxplots
+```{r}
+ggplot(dat_fin_long, aes(x = variable, y = value)) +
+  geom_boxplot() +
+  theme_minimal() +
+  xlab("Variable") +
+  ylab("Value") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
 #sequence for facets
 ```{r}
 desired_order <- c("Non-Hispanic Black", "Hispanic", "Asian", "Alaska/Pacific-Islander", 
@@ -48,7 +64,7 @@ dat_fin_long$variable <- factor(dat_fin_long$variable, levels = desired_order)
 ```
 
 
-#test mapping
+# mapping
 ```{r}
 color_palette <- viridis(3, option = "D")
 ggplot() +
