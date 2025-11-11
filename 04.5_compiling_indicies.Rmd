@@ -1,0 +1,114 @@
+---
+title: "04.5_compiling_indices"
+output: pdf_document
+date: "2024-08-27"
+---
+
+```{r}
+
+# Define the path to the folder containing the CSV files
+folder_path <- "D:/cc_vulnerability/mansc_results/index_vars/"
+
+# Get a list of all CSV files in the folder
+csv_files <- list.files(path = folder_path, pattern = "\\.csv$", full.names = TRUE)
+
+# Read all CSV files into a list
+list_of_dataframes <- csv_files |> 
+  map(read_csv)
+
+# Bind columns from all data frames
+combined_data <- list_of_dataframes |> 
+  bind_cols() |>
+  select(c(
+    "geoid",
+    "Non-Hispanic Black", "Hispanic", "Asian", "Alaska/Pacific-Islander",
+    "Health insurance", "Federal assistance", "Households in poverty",
+    "Un-employment", "Language barrier", "Foregin born", "Single parent",
+    "Access to vechilce",
+    "PC1",  "PC2",
+    "efa_1", "efa_2",
+    "tsne_1", "tsne_2",
+    "umap_1", "umap_2",
+    "AE_indx1", "AE_indx2"
+  )) |>
+  rename_with(~ toupper(.), .cols = contains("efa") | contains("UMAP"))|>
+  rename_with(~ str_replace(., "tsne", "tSNE"), .cols = contains("tsne")) |>
+  #multiply PC1 values with -1 to fix direction
+  mutate(
+    PC1 = PC1 * -1,
+    PC2 = PC2 * -1
+  )
+
+write_csv(combined_data, "D:/cc_vulnerability/mansc_results/index_vars/all_indicies_combined.csv")
+```
+
+
+#correlation between latent variables and orginal inputs
+```{r}
+desired_order <- c("Non-Hispanic Black", "Hispanic", "Asian", "Alaska/Pacific-Islander", 
+                   "Households in poverty", "Federal assistance", "Un-employment",
+                   "Health insurance", "Language barrier", "Single parent",
+                   "Access to vechilce", "Foregin born", 
+                   "PC1", "PC2", 
+                   "tSNE_1", "tSNE_2", 
+                   "EFA_1", "EFA_2", 
+                   "UMAP_1", "UMAP_2",
+                   "AE_indx1", "AE_indx2")
+
+cormat <- round(x=cor(combined_data[,2:23], 
+                      method = "spearman", 
+                      use = "complete.obs"), 
+                digits = 2) |>
+  melt() |> 
+  clean_names() |>
+  mutate_at(vars(var1, var2), ~str_replace_all(., "_(?=[A-Z])", " ")) |>
+  mutate_at(vars(var1, var2), ~factor(., levels = desired_order))
+```
+
+#plotting heatmap
+```{r}
+ggplot(cormat, aes(x = var2, y = var1, fill = value, label = value)) + #
+  geom_tile(color = "white") +
+  geom_text(color = "black", size = 3, vjust = 1) +
+  scale_fill_gradient2(low = "red", high = "royalblue", mid = "white",
+                       midpoint = 0,
+                       limit = c(-1, 1), space = "Lab",
+                       name = "Spearman Correlation coefficient") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, size = 11, hjust = 1),
+        axis.text.y = element_text(angle = 0, vjust = 0.5, size = 11, hjust = 1),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = "bottom", legend.box = "horizontal") +
+  coord_fixed()+
+  geom_vline(xintercept = c(0, 4.5, 7.5,  12.5, 14.5, 16.5, 18.5, 20.5), 
+             color = "black", linewidth=1.25) +
+  geom_hline(yintercept = c(0, 4.5, 7.5,  12.5, 14.5, 16.5, 18.5, 20.5), 
+             color = "black", linewidth=1.25) 
+
+
+#save figure
+ggsave("D:/cc_vulnerability/mansc_results/sdoh_corrplt_with_indicies.tiff",
+       width=10, height= 10, dpi=300,
+       bg="white")
+```
+
+#exporting indicies to jonathan
+```{r}
+#get it from 02_census_dat file
+tract_shp<- ped_pop_tract |>
+  select(1,2,5)
+
+mapping_df<- combined_data |>
+  select(c(1, 14, 16)) |>
+  left_join(tract_shp, by="geoid")
+
+write_csv(mapping_df, "D:/cc_vulnerability/mansc_results/export_indicies.csv")
+```
+
+
+
