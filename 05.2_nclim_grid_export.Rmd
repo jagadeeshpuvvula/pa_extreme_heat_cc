@@ -1,0 +1,882 @@
+---
+title: "05.2_clim_grid_export"
+output: pdf_document
+date: "2025-04-18"
+---
+
+#load required libraries
+```{r}
+library(pacman)
+pacman::p_load(tidyverse, glue, httr, terra, fs, httr, ncdf4, raster, stringr, sf, broom)
+```
+
+#extract gridded temperature data from nClimGrid-Daily v1.0.0 data - accessed on April 18, 2025
+#obtained data for JJA covering 2012-2024
+```{r}
+# Set your desired output directory
+output_dir <- "D:/cc_vulnerability/nclim_grid"
+dir.create(output_dir, showWarnings = FALSE)
+
+# Define years and months
+years <- 2012:2024
+months <- c("06", "07", "08")  # June, July, August
+
+# Base URL
+base_url <- "https://www.ncei.noaa.gov/data/nclimgrid-daily/access/grids"
+
+# Loop over years and months
+for (year in years) {
+  for (month in months) {
+    file_name <- glue("ncdd-{year}{month}-grd-scaled.nc")
+    file_url <- glue("{base_url}/{year}/{file_name}")
+    dest_file <- file.path(output_dir, file_name)
+
+    # Download if file doesn't exist
+    if (!file.exists(dest_file)) {
+      try({
+        r <- GET(file_url, write_disk(dest_file, overwrite = TRUE), timeout(60))
+        if (r$status_code == 200) {
+          message(glue("Downloaded: {file_name}"))
+        } else {
+          message(glue("Failed: {file_name} (status {r$status_code})"))
+          if (file.exists(dest_file)) unlink(dest_file)
+        }
+      }, silent = TRUE)
+    }
+  }
+}
+
+```
+
+#convert nc to tif format
+```{r}
+# Set input and output folders
+input_folder <- "D:/cc_vulnerability/nclim_grid/"
+output_folder <- "D:/cc_vulnerability/nclim_grid_raster/"
+
+# Create output folder if it doesn't exist
+dir_create(output_folder)
+
+# List all NetCDF files
+nc_files <- dir_ls(input_folder, glob = "*.nc")
+
+# Function to extract tmax and save daily rasters
+process_tmax_file <- function(nc_file) {
+  r <- rast(nc_file)
+  
+  # Find tmax layer(s) only
+  tmax_layers <- r[[grep("tmax", names(r), ignore.case = TRUE)]]
+  
+  # Get time values
+  time_values <- terra::time(tmax_layers)
+  
+  # Save each daily raster
+  for (i in 1:nlyr(tmax_layers)) {
+    date_str <- as.character(time_values[i])
+    out_file <- file.path(output_folder, paste0(date_str, ".tif"))
+    
+    writeRaster(tmax_layers[[i]], out_file, overwrite = TRUE)
+  }
+}
+
+# Apply function to each NetCDF file
+for (f in nc_files) {
+  process_tmax_file(f)
+}
+```
+
+#Get NOAA climate gridded monthly normals data for year 1901-2000 (Max temp only)
+#Accessed on April 18, 2025
+```{r}
+# Define the URL of the NetCDF file
+url <- "https://www.nodc.noaa.gov/archive/arc0196/0248762/1.1/data/0-data/tmax-1901_2000-monthly-normals-v1.0.nc"
+
+# Define the destination file path
+destfile <- "D:/cc_vulnerability/tmax-1901_2000-monthly-normals-v1.0.nc"
+
+# Download the file
+httr::GET(url, write_disk(destfile, overwrite = TRUE))
+```
+
+#open data and filter JJA months only
+```{r}
+library(ncdf4)
+library(raster)
+library(sp)
+
+# Open the NetCDF file
+clim_norm <- nc_open("D:/cc_vulnerability/NOAA_climate_normals/tmax-1901_2000-monthly-normals-v1.0.nc")
+
+# Extract coordinates
+lon <- ncvar_get(clim_norm, "lon")
+lat <- ncvar_get(clim_norm, "lat")
+
+# Extract the 'mlytmax_norm' variable
+mlytmax_norm <- ncvar_get(clim_norm, "mlytmax_norm")
+
+# Extract dimensions to understand the structure
+dims <- dim(mlytmax_norm)
+
+# Create a list to store the rasters for June, July, and August
+month_rasters <- list()
+
+# Process for months 6, 7, and 8 (June, July, August)
+for (month_idx in c(6, 7, 8)) {
+  # Extract the data for the specific month
+  month_data <- mlytmax_norm[, , month_idx]
+  
+  # Create a raster directly from the NetCDF structure
+  r <- raster(nrows=length(lat), ncols=length(lon))
+  extent(r) <- extent(min(lon), max(lon), min(lat), max(lat))
+  projection(r) <- CRS("+proj=longlat +datum=WGS84")
+  
+  # Fill the raster with data - maintaining original orientation
+  # We need to get the data in the right orientation
+  values(r) <- as.vector(month_data)
+  
+  # Store the raster
+  month_rasters[[month_idx-5]] <- r
+}
+
+# Save the rasters with proper geographic information
+writeRaster(month_rasters[[1]], "D:/cc_vulnerability/NOAA_climate_normals/june_max_temp_norm.tif", 
+            format="GTiff", overwrite=TRUE)
+writeRaster(month_rasters[[2]], "D:/cc_vulnerability/NOAA_climate_normals/july_max_temp_norm.tif", 
+            format="GTiff", overwrite=TRUE)
+writeRaster(month_rasters[[3]], "D:/cc_vulnerability/NOAA_climate_normals/august_max_temp_norm.tif", 
+            format="GTiff", overwrite=TRUE)
+
+# Close the NetCDF file
+nc_close(clim_norm)
+```
+
+#plot climate normals
+```{r}
+library(terra)
+library(sf)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+
+# Read in the boundary shapefile (already assumed to be conus_sf)
+# Read the .tif files
+tif_paths <- list.files("D:/cc_vulnerability/NOAA_climate_normals", 
+                        pattern = "\\.tif$", 
+                        full.names = TRUE)
+
+# Read and crop each raster
+raster_list <- lapply(tif_paths, function(path) {
+  r <- rast(path)
+  conus_proj <- st_transform(conus_sf, crs(r))  # Reproject to match raster CRS
+  cropped <- crop(r, vect(conus_proj))
+  mask(cropped, vect(conus_proj))
+})
+
+
+# Convert each raster to dataframe for ggplot
+df_list <- lapply(raster_list, function(r) {
+  as.data.frame(r, xy = TRUE, na.rm = TRUE) |> 
+    rename(value = 3)  # assuming single-layer rasters
+})
+
+# Manual rename mapping
+new_order <- c("june_max_temp_norm", "july_max_temp_norm", "august_max_temp_norm")
+new_labels <- c("June", "July", "August")
+
+# Reorder the df_list and apply new titles
+df_list <- df_list[new_order]
+
+# Optional: Assign names to identify the plots
+names(df_list) <- basename(tools::file_path_sans_ext(tif_paths))
+
+# Define common fill scale
+all_values <- unlist(lapply(df_list, \(df) df$value))
+global_min <- min(all_values, na.rm = TRUE)
+global_max <- max(all_values, na.rm = TRUE)
+
+fill_scale <- scale_fill_viridis(
+  name = "Historic Tmax normals (°C)",
+  option = "C",     # yellow to blue
+  limits = c(global_min, global_max)
+)
+
+# Generate plots
+plot_list <- lapply(seq_along(df_list), function(i) {
+  ggplot(df_list[[i]]) +
+    geom_tile(aes(x = x, y = y, fill = value)) +
+    geom_sf(data = conus_sf, fill = NA, color = "black", size = 0.3) +
+    coord_sf() +
+    theme_void() +
+    fill_scale +
+    ggtitle(new_labels[i]) +
+    theme(
+      legend.position = "bottom",
+      plot.title = element_text(size = 12, face = "bold")
+    )
+})
+
+final_plot <- wrap_plots(plot_list, ncol = 3, guides = "collect") &
+  theme(legend.position = "bottom")
+
+ggsave(final_plot, 
+       file="D:/cc_vulnerability/NOAA_climate_normals/historic_normals.tiff",
+       width = 14,height = 8,
+       dpi=300,
+       bg="white")
+```
+
+
+#now count number of days between 2012-2024 (only JJA) that exceeded NOAA climate normals
+```{r}
+# Define paths
+normals_path <- "D:/cc_vulnerability/NOAA_climate_normals/"
+daily_temp_path <- "D:/cc_vulnerability/nclim_grid_raster/"
+output_dir <- "D:/cc_vulnerability/exceed_count_results/"
+dir.create(output_dir, showWarnings = FALSE)
+
+# Load climate normals for each month
+june_normal <- raster(paste0(normals_path, "june_max_temp_norm.tif"))
+july_normal <- raster(paste0(normals_path, "july_max_temp_norm.tif"))
+august_normal <- raster(paste0(normals_path, "august_max_temp_norm.tif"))
+
+# Process each year and month
+for(year in 2012:2024) {
+  for(month in c(6, 7, 8)) {
+    month_name <- month.name[month]
+    cat("Processing", year, month_name, "\n")
+    
+    # Get appropriate normal raster based on month
+    if(month == 6) {
+      normal_raster <- june_normal
+    } else if(month == 7) {
+      normal_raster <- july_normal
+    } else if(month == 8) {
+      normal_raster <- august_normal
+    }
+    
+    # Determine number of days in month
+    days_in_month <- days_in_month(as.Date(paste0(year, "-", month, "-01")))
+    
+    # Initialize flag to get template from first available day
+    template_set <- FALSE
+    exceed_count <- NULL
+    
+    # Process each day of the month
+    for(day in 1:days_in_month) {
+      # Format date components
+      date_str <- sprintf("%04d-%02d-%02d", year, month, day)
+      file_path <- paste0(daily_temp_path, date_str, ".tif")
+      
+      # Check if file exists
+      if(file.exists(file_path)) {
+        # Load daily temperature raster
+        daily_temp <- raster(file_path)
+        
+        # On first valid file, create our count template using the daily temp resolution
+        if(!template_set) {
+          exceed_count <- daily_temp * 0
+          template_set <- TRUE
+        }
+        
+        # Resample the normal raster to match daily temperature resolution
+        normal_resampled <- resample(normal_raster, daily_temp)
+        
+        # Create binary mask where daily temp exceeds normal
+        exceeded <- daily_temp > normal_resampled
+        
+        # Add to counter
+        exceed_count <- exceed_count + exceeded
+      } else {
+        cat("File not found:", file_path, "\n")
+      }
+    }
+    
+    if(!is.null(exceed_count)) {
+      # Save the raster with descriptive filename
+      outfile <- paste0(output_dir, year, "_", month_name, "_exceed_days.tif")
+      writeRaster(exceed_count, outfile, overwrite = TRUE)
+      
+      # Calculate statistics for reporting
+      mean_exceed <- cellStats(exceed_count, 'mean')
+      max_exceed <- cellStats(exceed_count, 'max')
+      
+      cat(year, month_name, "- Average days exceeding normal:", round(mean_exceed, 1), 
+          "- Max days exceeding normal:", max_exceed, 
+          "out of", days_in_month, "days\n\n")
+    } else {
+      cat("No valid data found for", year, month_name, "\n\n")
+    }
+  }
+}
+```
+
+#Now aggregate the data to a single layer for manuscript
+```{r}
+# Define path to the exceeded days files
+exceed_dir <- "D:/cc_vulnerability/exceed_count_results/"
+
+# Get list of all the exceed days raster files
+file_list <- list.files(exceed_dir, pattern = ".*_exceed_days\\.tif$", full.names = TRUE)
+
+cat("Found", length(file_list), "result files to process\n")
+
+# Check if we have files to process
+if(length(file_list) == 0) {
+  stop("No exceed_days.tif files found in the directory")
+}
+
+# Load the first file to use as a template
+template <- raster(file_list[1])
+cat("Using resolution from first file:", res(template), "\n")
+
+# Initialize sum raster with zeros
+total_exceed_days <- template * 0
+
+# Process each file
+for(i in 1:length(file_list)) {
+  # Extract year and month from filename for reporting
+  filename <- basename(file_list[i])
+  year_month <- str_extract(filename, "\\d{4}_[A-Za-z]+")
+  
+  cat("Processing file", i, "of", length(file_list), "-", year_month, "\n")
+  
+  # Load the raster
+  current_raster <- raster(file_list[i])
+  
+  # Add to total
+  total_exceed_days <- total_exceed_days + current_raster
+}
+
+# Save the total exceed days raster
+output_file <- paste0(exceed_dir, "total_exceed_days_2012_2024.tif")
+writeRaster(total_exceed_days, output_file, overwrite = TRUE)
+
+# Calculate statistics for reporting
+min_val <- cellStats(total_exceed_days, 'min')
+mean_val <- cellStats(total_exceed_days, 'mean')
+max_val <- cellStats(total_exceed_days, 'max')
+
+cat("\nProcessing complete!\n")
+cat("Total days exceeding normal temperatures (2012-2024):\n")
+cat("Minimum:", min_val, "\n")
+cat("Mean:", mean_val, "\n")
+cat("Maximum:", max_val, "\n")
+cat("Output saved to:", output_file, "\n")
+```
+
+#cumulative count viz
+```{r}
+#current warming - total days = 1,196 (June 1st - August 31 over 2012 to 2024)
+#using GHCNd and NOAA climate normals
+noaa_extr_heat_df <- as.data.frame(noaa_extr_heat, xy = TRUE) |>
+  rename(ext_ht_cnt = USASummer_NOAA) |>
+  filter(ext_ht_cnt != 0) |>
+  mutate(ext_ht_pct = (ext_ht_cnt/1196)*100,
+         ext_ht_quartile = ntile(ext_ht_pct, 3),
+         ext_ht_quartile = factor(ext_ht_quartile,
+                                  levels = 1:3,
+                                  labels = paste0("Q", 1:3)))
+```
+
+#State shapefile
+```{r}
+state_shp<- tigris::states(cb=F) |>
+  filter(!STUSPS %in% c("AK", "HI", "GU", "VI", "MP", "AS", "PR"))
+```
+
+
+##current climate change - updated april 17
+```{r}
+current_cc<- 
+  ggplot()+
+  geom_raster(data = noaa_extr_heat_df, aes(x = x, y = y, fill = ext_ht_quartile))+
+  geom_sf(data = state_shp, aes(geometry = geometry), fill= NA, color = "white", size = 20,  show.legend = F)+
+  geom_point(data = cities, aes(x = x, y = y), color = "yellow", size = 2,  show.legend = F) +
+  scale_fill_manual(values=
+  quartile_colors <- c(
+  "Q1" = "#4169E1",  # Royal Blue
+  "Q2" = "#20B2AA",  # Light Sea Green (turquoise)
+  "Q3" = "#DC143C"   # Crimson
+)) +
+  theme_void() +
+  theme(legend.position = "bottom")+
+  guides(fill = guide_legend("Current warming trend: 2012-2024 (JJA)"))
+
+ggsave(current_cc, 
+       file="D:/cc_vulnerability/updated_maps/current_warming_ghcn.tiff",
+       width = 14,height = 10,
+       dpi=300,
+       bg="white")
+```
+
+#anomaly trends for major cities in the US over 2012-2024
+```{r}
+cities <- data.frame(
+    city = c(
+        "New York", "Los Angeles", "Chicago", "Houston", "Phoenix", "Philadelphia", 
+        "San Antonio", "San Diego", "Dallas", "San Jose", "Austin", "Jacksonville", 
+        "Fort Worth", "Columbus", "Charlotte", "San Francisco", "Indianapolis", 
+        "Seattle", "Denver", "Washington",
+        "El Paso", "Nashville", 
+        "Oklahoma City", "Portland", 
+        "Las Vegas", "Memphis", "Louisville", "Baltimore", "Milwaukee",
+        "Boston", "Salt Lake City", "Tucson", "Albuquerque",
+        "Minneapolis", "Hartford", "Richmond", "Bismarck", "Montpelier", 
+        "Jackson", "Madison", "Pierre", "Helena", "Cheyenne",
+        "Lincoln"
+    ),
+    state = c(
+        "NY", "CA", "IL", "TX", "AZ", "PA", 
+        "TX", "CA", "TX", "CA", "TX", "FL", 
+        "TX", "OH", "NC", "CA", "IN", "WA", 
+        "CO", "DC",
+        "TX", "TN", 
+        "OK", "OR", 
+        "NV", "TN", "KY", "MD", "WI",
+        "MA", "UT", "AZ", "NM",
+        "MN", "CT", "VA", "ND", "VT",
+        "MS", "WI", "SD", "MT", "WY",
+        "NE"
+    ),
+    x = c(
+        -74.0060, -118.2437, -87.6298, -95.3698, -112.0740, -75.1652, 
+        -98.4936, -117.1611, -96.7970, -121.8863, -97.7431, -81.6557, 
+        -97.3327, -82.9988, -80.8431, -122.4194, -86.1581, -122.3321, 
+        -104.9903, -77.0369,
+        -106.4850, -86.7816, -97.5164, -122.6765, 
+        -115.1398, -90.0489, -85.7585, -76.6122, -87.9065,
+        -71.0589, -111.8910, -110.9747, -106.6504,
+        -93.2650, -72.9280, -77.4600, -100.7831, -72.5778,
+        -90.1848, -89.3985, -98.1999, -104.2805, -104.8762,
+        -96.6817
+    ),
+    y = c(
+        40.7128, 34.0522, 41.8781, 29.7604, 33.4484, 39.9526, 
+        29.4241, 32.7157, 32.7767, 37.3382, 30.2672, 30.3322, 
+        32.7555, 39.9612, 35.2271, 37.7749, 39.7684, 47.6062, 
+        39.7392, 38.9072,
+        31.7619, 36.1627, 35.4676, 45.5231, 
+        36.1699, 35.1495, 38.2527, 39.2904, 43.0389,
+        42.3601, 40.7608, 32.2226, 35.0844,
+        44.9778, 41.7637, 37.5407, 48.7990, 44.2607,
+        32.2988, 42.3601, 43.5500, 44.3517, 41.1400,
+        40.8069
+    ),
+    stringsAsFactors = FALSE
+)
+
+
+# Define path to the exceeded days files
+exceed_dir <- "D:/cc_vulnerability/exceed_count_results/"
+
+# Convert cities to spatial points
+cities_sf <- st_as_sf(cities, coords = c("x", "y"), crs = 4326)
+
+# Get list of all the exceed days raster files
+file_list <- list.files(exceed_dir, pattern = ".*_exceed_days\\.tif$", full.names = TRUE)
+file_list <- file_list[!grepl("total_exceed_days", file_list)]  # Exclude the total file if it exists
+
+cat("Found", length(file_list), "result files to process\n")
+
+# Initialize results dataframe
+results <- data.frame()
+
+# Process each file
+for(file_path in file_list) {
+  # Extract year and month from filename
+  filename <- basename(file_path)
+  year <- as.numeric(str_extract(filename, "^\\d{4}"))
+  month <- str_extract(filename, "[A-Za-z]+(?=_exceed)")
+  
+  cat("Processing", month, year, "\n")
+  
+  # Load the raster
+  exceed_raster <- raster(file_path)
+  
+  # Extract values at city locations
+  city_values <- raster::extract(exceed_raster, cities_sf)
+  
+  # Add to results dataframe
+  temp_df <- data.frame(
+    city = cities$city,
+    state = cities$state,
+    year = year,
+    month = month,
+    anomaly_days = city_values
+  )
+  
+  results <- bind_rows(results, temp_df)
+}
+
+# Create summary that includes all months separately
+complete_summary <- results %>%
+  pivot_wider(
+    id_cols = c(city, state, year),
+    names_from = month,
+    values_from = anomaly_days
+  ) %>%
+  mutate(total_anomaly_days = rowSums(select(., June, July, August), na.rm = TRUE))
+
+# Save results
+write.csv(complete_summary, paste0(exceed_dir, "city_anomaly_days_complete.csv"), row.names = FALSE)
+```
+
+#trend for CONUS - heat anomalies during study period
+```{r}
+# Load required libraries
+library(raster)
+library(stringr)
+
+# Define paths
+exceed_dir <- "D:/cc_vulnerability/exceed_count_results/"
+annual_dir <- paste0(exceed_dir, "annual_summaries/")
+dir.create(annual_dir, showWarnings = FALSE, recursive = TRUE)
+
+# Get list of all existing exceed days raster files
+file_list <- list.files(exceed_dir, pattern = ".*_exceed_days\\.tif$", full.names = TRUE)
+file_list <- file_list[!grepl("total_exceed_days|beta|p_value|r_squared|significant", file_list)]  # Exclude any analysis results
+
+cat("Found", length(file_list), "exceed days files\n")
+
+# Extract years and months from filenames
+years <- sapply(file_list, function(f) {
+  as.numeric(str_extract(basename(f), "^\\d{4}"))
+})
+
+months <- sapply(file_list, function(f) {
+  month_name <- str_extract(basename(f), "[A-Za-z]+(?=_exceed)")
+  return(month_name)
+})
+
+# Get unique years
+unique_years <- sort(unique(years))
+cat("Found data for years:", paste(unique_years, collapse=", "), "\n")
+
+# Create annual summary rasters from monthly files
+annual_exceed_rasters <- list()
+
+for(year in unique_years) {
+  cat("Processing year", year, "\n")
+  
+  # Get files for this year
+  year_files <- file_list[years == year]
+  
+  if(length(year_files) > 0) {
+    # Load the first raster to use as template
+    template_raster <- raster(year_files[1])
+    annual_exceed <- template_raster * 0
+    
+    # Add all monthly rasters for this year
+    for(file in year_files) {
+      cat("  Adding", basename(file), "\n")
+      month_raster <- raster(file)
+      
+      # Ensure same extent and resolution
+      if(!compareRaster(month_raster, template_raster, stopiffalse=FALSE)) {
+        month_raster <- resample(month_raster, template_raster)
+      }
+      
+      annual_exceed <- annual_exceed + month_raster
+    }
+    
+    # Save annual summary
+    annual_file <- paste0(annual_dir, year, "_annual_exceed_days.tif")
+    writeRaster(annual_exceed, annual_file, overwrite = TRUE)
+    
+    # Store for regression analysis
+    annual_exceed_rasters[[as.character(year)]] <- annual_exceed
+    
+    # Report statistics
+    mean_exceed <- cellStats(annual_exceed, 'mean')
+    max_exceed <- cellStats(annual_exceed, 'max')
+    cat("  Annual", year, "- Average days exceeding normal:", round(mean_exceed, 1), 
+        "- Max days exceeding normal:", max_exceed, "\n")
+  } else {
+    cat("  No files found for year", year, "\n")
+  }
+}
+
+# Check if we have enough years for regression
+if(length(annual_exceed_rasters) < 3) {
+  stop("Not enough years with valid data to perform regression analysis (minimum 3 required)")
+}
+
+# Perform regression analysis
+cat("\nPerforming regression analysis to calculate trends...\n")
+
+# Get a template raster for results
+template_raster <- annual_exceed_rasters[[1]]
+
+# Create empty rasters for results
+beta_raster <- template_raster * 0
+p_value_raster <- template_raster * 0
+r_squared_raster <- template_raster * 0
+
+# Get dimensions of raster
+ncells <- ncell(template_raster)
+years_numeric <- as.numeric(names(annual_exceed_rasters))
+
+# Create a data matrix for regression
+# Rows = years, Columns = cells
+data_matrix <- matrix(NA, nrow = length(years_numeric), ncol = ncells)
+
+# Fill the matrix
+for(i in 1:length(years_numeric)) {
+  year_raster <- annual_exceed_rasters[[i]]
+  data_matrix[i,] <- getValues(year_raster)
+}
+
+# Function to perform regression for a single cell
+cell_regression <- function(cell_values, years) {
+  # Remove any NAs
+  valid <- !is.na(cell_values)
+  if(sum(valid) < 3) {  # Need at least 3 points for meaningful regression
+    return(c(NA, NA, NA))
+  }
+  
+  # Perform regression
+  model <- lm(cell_values[valid] ~ years[valid])
+  
+  # Extract results
+  beta <- coef(model)[2]  # Slope
+  p_val <- summary(model)$coefficients[2, 4]  # p-value for slope
+  r_sq <- summary(model)$r.squared  # R-squared
+  
+  return(c(beta, p_val, r_sq))
+}
+
+# Perform regression for each cell
+cat("Processing", ncells, "cells...\n")
+result_matrix <- matrix(NA, nrow = ncells, ncol = 3)
+
+# Use a progress indicator for large rasters
+progress_step <- max(1, floor(ncells / 100))
+
+for(cell in 1:ncells) {
+  # Show progress
+  if(cell %% progress_step == 0) {
+    cat("  Progress:", round(100 * cell / ncells), "%\n")
+  }
+  
+  cell_values <- data_matrix[, cell]
+  result_matrix[cell, ] <- cell_regression(cell_values, years_numeric)
+}
+
+# Fill result rasters
+beta_raster <- setValues(beta_raster, result_matrix[, 1])
+p_value_raster <- setValues(p_value_raster, result_matrix[, 2])
+r_squared_raster <- setValues(r_squared_raster, result_matrix[, 3])
+
+# Save regression results
+writeRaster(beta_raster, "D:/cc_vulnerability/warming_trend_study_prd/beta_coefficient_exceed_days.tif", overwrite = TRUE)
+writeRaster(p_value_raster,"D:/cc_vulnerability/warming_trend_study_prd/p_value_exceed_days.tif", overwrite = TRUE)
+writeRaster(r_squared_raster, "D:/cc_vulnerability/warming_trend_study_prd/r_squared_exceed_days.tif", overwrite = TRUE)
+
+# Create a significant trend raster (p < 0.05)
+significant_trend <- beta_raster * (p_value_raster < 0.05)
+writeRaster(significant_trend, paste0(exceed_dir, "significant_trend_exceed_days.tif"), overwrite = TRUE)
+
+# Display summary statistics
+cat("\nRegression Analysis Complete\n")
+cat("Mean beta coefficient:", cellStats(beta_raster, 'mean', na.rm = TRUE), 
+    "(avg. annual change in days exceeding normal)\n")
+
+# Count cells with significant positive and negative trends
+sig_positive <- sum(values(significant_trend) > 0, na.rm = TRUE)
+sig_negative <- sum(values(significant_trend) < 0, na.rm = TRUE)
+total_valid <- sum(!is.na(values(p_value_raster < 0.05)))
+
+if(total_valid > 0) {
+  cat("Cells with significant positive trend:", sig_positive, 
+      "(", round(100 * sig_positive / total_valid, 1), "%)\n")
+  cat("Cells with significant negative trend:", sig_negative, 
+      "(", round(100 * sig_negative / total_valid, 1), "%)\n")
+} else {
+  cat("No cells with significant trends found.\n")
+}
+
+# Plot the results
+# Load required libraries for plotting
+library(ggplot2)
+library(rasterVis)  # For raster visualization with ggplot2
+library(gridExtra)  # For arranging multiple plots
+library(viridis)    # For color palettes
+library(RColorBrewer)
+library(raster)     # For raster operations
+
+# Assuming beta_raster and p_value_raster are already created
+# If they're not available, you need to run your regression analysis first
+
+# Create significant trend raster (if not already created)
+# This assumes beta_raster and p_value_raster are already loaded
+if(!exists("significant_trend")) {
+  significant_trend <- beta_raster * (p_value_raster < 0.05)
+}
+
+# Create trend direction raster (if not already created)
+if(!exists("trend_direction")) {
+  trend_direction <- significant_trend
+  trend_direction[trend_direction > 0] <- 1  # Positive trend
+  trend_direction[trend_direction < 0] <- -1  # Negative trend
+}
+
+# Helper function to convert a raster to a data frame for ggplot
+raster_to_df <- function(raster_obj, value_name) {
+  df <- as.data.frame(raster_obj, xy = TRUE)
+  names(df)[3] <- value_name
+  return(df)
+}
+
+# Convert rasters to data frames
+beta_df <- raster_to_df(beta_raster, "beta") |> drop_na()
+pvalue_df <- raster_to_df(p_value_raster, "pvalue")
+rsq_df <- raster_to_df(r_squared_raster, "rsquared")
+sig_trend_df <- raster_to_df(significant_trend, "sig_trend")
+trend_dir_df <- raster_to_df(trend_direction, "direction")
+
+
+# Plot 1: Beta Coefficient
+p1 <- ggplot(beta_df) +
+  geom_tile(aes(x = x, y = y, fill = beta)) +  # use tile for uneven spacing
+  scale_fill_gradient2(
+    low = "#0047AB",    # cobalt blue for negative
+    mid = "white",      # neutral
+    high = "#DC143C",   # crimson red for positive
+    midpoint = 0,
+    name = "Tmax anomalies: 2012–2024 (β)"
+  ) +
+  geom_sf(data = conus_sf, 
+          aes(geometry = geometry), 
+          fill = NA, color = "black", 
+          size = 0.5, show.legend = FALSE) +  # Adjust size for a reasonable outline
+  theme_void() +
+  coord_sf() +  # switch from coord_equal to coord_sf
+  labs(title = "", subtitle = "") +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 12)
+  )
+
+
+# Plot 2: P-Value
+p2 <- ggplot(pvalue_df) +
+  geom_raster(aes(x = x, y = y, fill = pvalue)) +
+  scale_fill_gradientn(
+    colors = rev(brewer.pal(9, "YlOrRd")),
+    limits = c(0, 0.1),
+    oob = scales::squish
+  ) +
+  coord_equal() +
+  labs(title = "P-Value",
+       subtitle = "Statistical Significance",
+       fill = "p-value") +
+  theme_minimal() +
+  theme(legend.position = "right",
+        plot.title = element_text(size = 14, face = "bold"),
+        plot.subtitle = element_text(size = 12))
+
+# Plot 3: R-Squared
+p3 <- ggplot(rsq_df) +
+  geom_raster(aes(x = x, y = y, fill = rsquared)) +
+  scale_fill_viridis_c(option = "viridis") +
+  coord_equal() +
+  labs(title = "R-Squared",
+       subtitle = "Goodness of Fit",
+       fill = "R²") +
+  theme_minimal() +
+  theme(legend.position = "right",
+        plot.title = element_text(size = 14, face = "bold"),
+        plot.subtitle = element_text(size = 12))
+
+# Plot 4: Significant Trends
+p4 <- ggplot(sig_trend_df) +
+  geom_raster(aes(x = x, y = y, fill = sig_trend)) +
+  scale_fill_gradient2(
+    low = "blue",
+    mid = "white",
+    high = "red",
+    midpoint = 0,
+    na.value = "transparent"
+  ) +
+  coord_equal() +
+  labs(title = "Significant Trends",
+       subtitle = "Where p < 0.05",
+       fill = "β (sig.)") +
+  theme_minimal() +
+  theme(legend.position = "right",
+        plot.title = element_text(size = 14, face = "bold"),
+        plot.subtitle = element_text(size = 12))
+
+# Plot 5: Direction of Significant Trends
+p5 <- ggplot(trend_dir_df) +
+  geom_raster(aes(x = x, y = y, fill = factor(direction))) +
+  scale_fill_manual(
+    values = c("-1" = "blue", "0" = "white", "1" = "red"),
+    labels = c("-1" = "Decreasing", "0" = "No Trend", "1" = "Increasing"),
+    na.value = "transparent",
+    name = "Trend"
+  ) +
+  coord_equal() +
+  labs(title = "Direction of Significant Trends",
+       subtitle = "Red = Increasing, Blue = Decreasing") +
+  theme_minimal() +
+  theme(legend.position = "right",
+        plot.title = element_text(size = 14, face = "bold"),
+        plot.subtitle = element_text(size = 12))
+
+# Arrange plots in a grid
+# First the 2x2 grid of the regression metrics
+regression_grid <- grid.arrange(p1, p2, p3, p4, ncol = 2)
+
+# Save plots to disk
+ggsave("D:/cc_vulnerability/warming_trend_study_prd/beta_coefficient_map.tiff",
+       p1, width = 10, height = 8, dpi = 300)
+
+ggsave("p_value_map.png", p2, width = 10, height = 8, dpi = 300)
+#ggsave("r_squared_map.png", p3, width = 10, height = 8, dpi = 300)
+#ggsave("significant_trends_map.png", p4, width = 10, height = 8, dpi = 300)
+#ggsave("trend_direction_map.png", p5, width = 10, height = 8, dpi = 300)
+#ggsave("regression_metrics_grid.png", regression_grid, width = 14, height = 12, dpi = 300)
+```
+
+
+
+#plot trends over study period
+```{r}
+trend<- read_csv("D:/cc_vulnerability/exceed_count_results/city_anomaly_days_complete.csv") |>
+  mutate(city = paste(city, state, sep = ", "))
+
+trend_lm <- trend |>
+  group_by(city, state) |>
+  do(tidy(lm(total_anomaly_days ~ year, data = .))) |>
+  filter(term == "year") |>
+  mutate(
+    beta = round(estimate, 2),
+    pval = round(p.value, 2),
+    label = paste0(city, " (β =", beta, ", p =", pval, ")")
+  )
+
+trend_labeled <- trend |>
+  left_join(trend_lm |> select(city, state, label), by = c("city", "state"))
+
+ggplot(trend_labeled, aes(x = factor(year), y = label, fill = total_anomaly_days)) +
+  geom_tile(color = "white") +
+  scale_fill_viridis_c(name = "Daily maximum teperature anomalies\n2012-2004", 
+                       option = "C") +
+  labs(
+  x = "Year",
+  y = expression("City (" * italic(beta) * ", " * italic(p-value) * ")"),
+  title = ""
+  )+
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 0, hjust = 1),
+        legend.position = "bottom")
+
+ggsave(file="D:/cc_vulnerability/results_apr_2025/anomaly_trend_us_cities.tiff",
+       width = 10,height = 8,
+       dpi=300)
+```
+
+

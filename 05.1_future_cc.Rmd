@@ -5,162 +5,261 @@ date: "2024-05-15"
 output: pdf_document
 ---
 
+#updated in April 2025
+
 ```{r}
-#future climate change
-mid_cen_cc <- raster("~/Documents/extreme_heat_cc/data/CONUS/future_cc/midcentury_delta_USA.tif")
-late_cen_cc <- raster("~/Documents/extreme_heat_cc/data/CONUS/future_cc/latecentury_delta_USA.tif")
-
-#current climate change
-extr_heat <- raster("~/Documents/extreme_heat_cc/data/CONUS/current_cc/overall_trend.tif")
-
-#NOAA-reference file
-noaa_extr_heat <- raster("~/Documents/extreme_heat_cc/data/CONUS/NOAA_ref/USASummer_NOAA.tif")
+library(pacman)
+pacman::p_load(tidyverse, tidycensus, janitor, glue, httr, terra, fs, httr, 
+               ncdf4, raster, stringr, sf, broom, biscale,
+               tigris, cowplot, ggpattern)
 ```
 
+#State shapefile
 ```{r}
-#extreme_heat - total days = 1,100 (June 1st - August 31 over 2012 to 2022)
-extr_heat_df <- as.data.frame(extr_heat, xy = TRUE) |>
-  rename(ext_ht_cnt = overall_trend) |>
-  filter(ext_ht_cnt != 0)
-
-#NOAA reference file - total days = 1,100 (June 1st - August 31 over 2012 to 2022)
-noaa_extr_heat_df <- as.data.frame(noaa_extr_heat, xy = TRUE) |>
-  rename(ext_ht_cnt = USASummer_NOAA) |>
-  filter(ext_ht_cnt != 0)
-  
-
-#2030-2064
-mid_cen_cc_df <- as.data.frame(mid_cen_cc, xy = TRUE)|>
-  rename(mid_cen_delta = midcentury_delta_USA) |>
-  filter(mid_cen_delta != 0)
-
-#2065-2099
-late_cen_cc_df <- as.data.frame(late_cen_cc, xy = TRUE)|>
-  rename(late_cen_delta = latecentury_delta_USA) |>
-  filter(late_cen_delta != 0)
-
-```
-
-```{r}
-state_shp<- states(cb=F) |>
+conus_sf<- tigris::states(cb=F) |>
   filter(!STUSPS %in% c("AK", "HI", "GU", "VI", "MP", "AS", "PR"))
-
-cities <- data.frame(
-  city = c("New York", "Los Angeles", "Chicago", "Houston", "Phoenix", "Philadelphia", 
-           "San Antonio", "San Diego", "Dallas", "San Jose", "Austin", "Jacksonville", 
-           "Fort Worth", "Columbus", "Charlotte", "San Francisco", "Indianapolis", "Seattle", 
-           "Denver", "Washington"),
-  state = c("NY", "CA", "IL", "TX", "AZ", "PA", 
-            "TX", "CA", "TX", "CA", "TX", "FL", 
-            "TX", "OH", "NC", "CA", "IN", "WA", 
-            "CO", "DC"),
-  x = c(-74.0060, -118.2437, -87.6298, -95.3698, -112.0740, -75.1652, 
-        -98.4936, -117.1611, -96.7970, -121.8863, -97.7431, -81.6557, 
-        -97.3327, -82.9988, -80.8431, -122.4194, -86.1581, -122.3321, 
-        -104.9903, -77.0369),
-  y = c(40.7128, 34.0522, 41.8781, 29.7604, 33.4484, 39.9526, 
-        29.4241, 32.7157, 32.7767, 37.3382, 30.2672, 30.3322, 
-        32.7555, 39.9612, 35.2271, 37.7749, 39.7684, 47.6062, 
-        39.7392, 38.9072)
-)
 ```
 
+```{r}
+# Define file paths
+raster_files <- list(
+  mid_cen_lo_ems  = "D:/cc_vulnerability/cimp6_ensbl_data/JJA_Days_Above_95F_Count_2041_2060_low_emission.tif",
+  mid_cen_hi_ems  = "D:/cc_vulnerability/cimp6_ensbl_data/JJA_Days_Above_95F_Count_2041_2060_high_emission.tif",
+  late_cen_lo_ems = "D:/cc_vulnerability/cimp6_ensbl_data/JJA_Days_Above_95F_Count_2081_2100_low_emission.tif",
+  late_cen_hi_ems = "D:/cc_vulnerability/cimp6_ensbl_data/JJA_Days_Above_95F_Count_2081_2100_high_emission.tif"
+)
+
+# Load one raster to get CRS
+template_raster <- raster(raster_files[[1]])
+raster_crs <- crs(template_raster)
+
+# Transform and union CONUS shapefile
+conus_sf <- st_transform(conus_sf, raster_crs) |> st_union()
+conus_sp <- as(conus_sf, "Spatial")
+
+# Define processing function
+clip_and_crop_raster <- function(path, conus_sp) {
+  r <- raster(path)
+  r_masked <- mask(r, conus_sp)
+  r_cropped <- crop(r_masked, conus_sp)
+  return(r_cropped)
+}
+
+# Process all rasters
+processed_rasters <- raster_files |> 
+  map(~ clip_and_crop_raster(.x, conus_sp)) |> 
+  set_names(names(raster_files))
+
+#clean env
+rm(conus_sf, conus_sp, raster_crs, raster_files, template_raster)
+gc()
+```
+
+
+#transform to df format and break into categories
+```{r}
+# Correct number of breakpoints for 3 groups = 4 breakpoints
+mid_breaks <- c(-Inf, 91, 969, Inf)
+late_breaks <- c(-Inf, 469, 1369, Inf)
+
+# Function
+raster_to_df <- function(r, breaks) {
+  df <- as.data.frame(r, xy = TRUE)
+  df |>
+    rename(anomaly_frequency = 3) |>
+    drop_na(anomaly_frequency) |>
+    mutate(
+      anomaly_quartile = cut(anomaly_frequency,
+                             breaks = breaks,
+                             labels = c("Q1", "Q2", "Q3"),
+                             include.lowest = TRUE)
+    )
+}
+
+# Split rasters
+mid_rasters <- processed_rasters[grep("^mid_", names(processed_rasters))]
+late_rasters <- processed_rasters[grep("^late_", names(processed_rasters))]
+
+# Apply function
+mid_df <- map(mid_rasters, ~raster_to_df(.x, mid_breaks))
+late_df <- map(late_rasters, ~raster_to_df(.x, late_breaks))
+
+# Optionally combine
+all_df <- c(mid_df, late_df)
+
+```
 
 #prelim plots
+#State shapefile
+```{r}
+state_shp<- tigris::states(cb=F) |>
+  filter(!STUSPS %in% c("AK", "HI", "GU", "VI", "MP", "AS", "PR"))
+```
 
-##current climate change
+
+##Future warming - updated april 17
 ```{r}
 current_cc<- 
   ggplot()+
-  geom_raster(data = extr_heat_df, aes(x = x, y = y, fill = ext_ht_cnt))+
-  geom_sf(data = state_shp, aes(geometry = geometry), fill= NA, color = "white", size = 20,  show.legend = F)+
-  geom_point(data = cities, aes(x = x, y = y), color = "yellow", size = 2,  show.legend = F) +
-  scale_fill_viridis(option="A") +
+  geom_raster(data = all_df$late_cen_hi_ems, 
+              aes(x = x, y = y, 
+                  fill = anomaly_quartile))+
+  geom_sf(data = state_shp, 
+          aes(geometry = geometry), 
+          fill= NA, color = "white", 
+          size = 12,  show.legend = F)+
+  scale_fill_manual(values=
+  quartile_colors <- c(
+  "Q1" = "#4169E1",  # Royal Blue
+  "Q2" = "#20B2AA",  # Light Sea Green (turquoise)
+  "Q3" = "#DC143C"   # Crimson
+  )) +
   theme_void() +
   theme(legend.position = "bottom")+
-  guides(fill = guide_colorbar("Frequency of hot days 2012-2022"))+
-  theme(legend.position.inside = c(0.7, 0.1),  # Custom position (x, y)
-        legend.justification = c(2.4, 0),
-        legend.direction = "horizontal")   # Anchor point (right, bottom)
+  guides(fill = guide_legend("Temperature anomalies (JJA)"))
+
+ggsave(current_cc, 
+       file="D:/cc_vulnerability/results_apr_2025/late_cen_hi_ems.tiff",
+       width = 12,height = 10,
+       dpi=300,
+       bg="white")
 ```
 
-#city specific plots
+
+#categorize future climate anomalies data retaining in raster format
 ```{r}
-current_cc <-
-  ggplot() +
-  geom_raster(data = extr_heat_df, aes(x = x, y = y, fill = ext_ht_cnt)) +
-  geom_sf(data = state_shp, aes(geometry = geometry), fill = NA, color = "white", size = 0.5, show.legend = FALSE) +
-  geom_point(data = cities, aes(x = x, y = y), color = "yellow", size = 2, show.legend = FALSE) +
-  scale_fill_viridis(option = "A", limits = c(0, 600)) +
-  theme_void() +
-  guides(fill = guide_colorbar("Warming trend 2012-2022")) +
-  theme(legend.text = element_text(angle = 45),
-        legend.position = "bottom",
-        legend.justification = "center",
-        legend.direction = "horizontal",
-        plot.margin = unit(c(1, 1, 4, 1), "lines")  # Increase bottom margin for the legend
-        ) +
-  coord_sf(
-    xlim = c(-75.3, -75.0), 
-    ylim = c(39.8, 40.2)
+# Define breaks
+mid_breaks <- c(-Inf, 91, 969, Inf)
+late_breaks <- c(-Inf, 469, 1369, Inf)
+
+# Function to classify raster into quantiles
+raster_to_quantiles <- function(r, breaks) {
+  # Apply 'cut' to classify values into categories
+  classified_raster <- cut(r[], breaks = breaks, labels = c("Q1", "Q2", "Q3"), include.lowest = TRUE)
+  
+  # Convert to raster object with same extent and resolution as input raster
+  result_raster <- raster(r)
+  result_raster[] <- as.numeric(classified_raster)  # Assign numeric categories
+  
+  return(result_raster)
+}
+
+# Process 'mid_' rasters
+mid_rasters <- processed_rasters[grep("^mid_", names(processed_rasters))]
+mid_rasters_quantized <- lapply(mid_rasters, raster_to_quantiles, breaks = mid_breaks)
+
+# Process 'late_' rasters
+late_rasters <- processed_rasters[grep("^late_", names(processed_rasters))]
+late_rasters_quantized <- lapply(late_rasters, raster_to_quantiles, breaks = late_breaks)
+
+# Combine the processed rasters if needed
+all_quantized_rasters <- c(mid_rasters_quantized, late_rasters_quantized)
+
+# Remove all objects except for 'all_quantized_rasters' and 'processed_rasters'
+rm(list = setdiff(ls(), c("all_quantized_rasters", "processed_rasters")))
+
+# Loop over each raster in 'all_quantized_rasters' and assign it to the global environment in terra format
+for (raster_name in names(all_quantized_rasters)) {
+  # Convert the raster to terra format
+  terra_raster <- terra::rast(all_quantized_rasters[[raster_name]])
+  
+  # Assign the terra raster to the global environment with the same name
+  assign(raster_name, terra_raster, envir = .GlobalEnv)
+}
+```
+
+
+#bivariate mapping future warming + pediatric vulnerability
+#final version of vulnerability index - created on June 3, 2024
+```{r}
+tracts_conus <- st_read("D:/cc_vulnerability/tracts_shp/tracts_conus_shape.shp") |>
+  dplyr::select(c(1, 5))
+
+ped_indx <- read_csv("D:/cc_vulnerability/mansc_results/index_vars/all_indicies_combined.csv") |>
+  dplyr::select(c(1, 14)) |>
+  right_join(tracts_conus, by= "geoid") 
+
+# First, make sure ped_indx is an sf object with geometry
+if (!("sf" %in% class(ped_indx))) {
+  # If it lost its sf class during the join, convert it back
+  ped_indx <- st_as_sf(ped_indx)
+}
+
+# Set the CRS to NAD83 (EPSG:4269)
+ped_indx <- st_set_crs(ped_indx, 4269)  # EPSG code for NAD83
+```
+
+#Harmonize and join pediatric indicies and future warming data layers 
+```{r}
+# Now transform to match the raster's CRS (WGS84)
+ped_indx_transformed <- st_transform(ped_indx, crs(late_cen_hi_ems)) #<-
+
+# Convert to a terra vector object
+vector_terra <- vect(ped_indx_transformed)
+
+# Choose the appropriate column (adjust based on the output above)
+field_to_use <- names(vector_terra)[2]  # Change index as needed
+
+# Rasterize the vector data to match the raster's resolution
+result_raster <- rasterize(vector_terra, late_cen_hi_ems, field=field_to_use) #<-
+
+# Create a multi-layer raster by stacking both layers
+combined_raster <- c(late_cen_hi_ems, result_raster) #<-
+
+# Set appropriate names for the layers
+names(combined_raster) <- c("temperature_anomalies", "PC1")
+```
+
+```{r}
+# Create a data frame from the combined raster that has both variables
+bivariate_raster_df <- as.data.frame(combined_raster, xy = TRUE) |>
+  filter(!is.na(PC1)) |>
+  mutate(PC1_level = ntile(PC1, 3),
+         bi_class = paste(temperature_anomalies, PC1_level, sep = "-")
+         )
+```
+
+#bivariate plotting - CONUS
+#nclimgrid anomalies and PC1
+```{r}
+map<- ggplot()+
+  geom_raster(data = bivariate_raster_df, 
+                aes(x = x, y = y, fill = bi_class), 
+                show.legend = F)+
+  geom_sf(data = state_shp, 
+            aes(geometry = geometry), 
+            fill= NA, color = "white",
+            size = 12,  
+            show.legend = F)+
+  labs(x = NULL, y = NULL)+
+    bi_scale_fill(pal = "DkBlue2", dim = 3)+
+    theme_void() +
+    theme(legend.position = "none")+
+    bi_theme()
+
+
+legend <- bi_legend(pal = "DkBlue2",
+                    dim = 3,
+                    xlab = "Pediatric vulnerability",
+                    ylab = "Tmax anomalies",
+                    size = 10)
+
+map_fin<- ggdraw() +
+    draw_plot(map, 0, 0, 1, 1) +
+    draw_plot(legend, 0.125, 0.1, 0.2, 0.2)
+```
+
+
+```{r}
+tiff(
+  filename = "D:/cc_vulnerability/results_apr_2025/bivariate_late_cen_hi_ems.tiff",
+  width = 12, height = 10, units = "in", 
+  res = 300, compression = "lzw"  # LZW compression uses less memory
 )
-
-# Draw the plot with the legend positioned outside at the bottom
-grid::grid.draw(current_cc + theme(legend.position = "bottom"))
+print(map_fin)
+dev.off()
 ```
 
 
-```{r}
-ggsave(current_cc,
-       file="~/Documents/extreme_heat_cc/results/CONUS/extreme_heat_US.tiff",
-       width = 14,height = 10,
-       dpi=100)
-```
-
-##Future climate change - Mid century (2030-2064)
-```{r}
-mid_century_delta<- 
-  ggplot()+
-  geom_raster(data = mid_cen_cc_df, aes(x = x, y = y, fill = mid_cen_delta))+
-  geom_sf(data = state_shp, aes(geometry = geometry), fill= NA, color = "white", size = 20,  show.legend = F)+
-  geom_point(data = cities, aes(x = x, y = y), color = "yellow", size = 2,  show.legend = F) +
-  scale_fill_viridis(option="A") +
-  theme_void() +
-  theme(legend.position = "bottom")+
-  guides(fill = guide_colorbar("Mid century \u0394 RCP8.5-RCP4.5"))+
-  theme(legend.position = c(0.7, 0.1),  # Custom position (x, y)
-        legend.justification = c(2.4, 0),
-        legend.direction = "horizontal")   # Anchor point (right, bottom)
-```
-
-```{r}
-ggsave(mid_century_delta,
-       file="~/Documents/extreme_heat_cc/results/CONUS/mid_cen_delta.tiff",
-       width = 14,height = 10,
-       dpi=100)
-```
-
-##Future climate change - Late Century (2065-2099)
-```{r}
-late_century_delta<- 
-  ggplot()+
-  geom_raster(data = late_cen_cc_df, aes(x = x, y = y, fill = late_cen_delta))+
-  geom_sf(data = state_shp, aes(geometry = geometry), fill= NA, color = "white", size = 20,  show.legend = F)+
-  geom_point(data = cities, aes(x = x, y = y), color = "yellow", size = 2,  show.legend = F) +
-  scale_fill_viridis(option="A") +
-  theme_void() +
-  theme(legend.position = "bottom")+
-  guides(fill = guide_colorbar("Late century \u0394 RCP8.5-RCP4.5"))+
-  theme(legend.position = c(0.7, 0.1),  # Custom position (x, y)
-        legend.justification = c(2.4, 0),
-        legend.direction = "horizontal")   # Anchor point (right, bottom)
-```
-
-```{r}
-ggsave(late_century_delta,
-       file="~/Documents/extreme_heat_cc/results/CONUS/late_cen_delta_hdef.tiff",
-       width = 14,height = 10,
-       dpi=600)
-```
 
 

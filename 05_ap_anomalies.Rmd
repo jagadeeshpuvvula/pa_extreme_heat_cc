@@ -1,0 +1,768 @@
+---
+title: "05_ap_anomalies"
+output: pdf_document
+date: "2025-05-06"
+---
+
+```{r}
+# PM2.5 Exceedance Frequency Analysis
+# This script processes PM2.5 TIF files from 2010-2020 (4,018 days)
+# and calculates frequency of days exceeding 35 μg/m³
+
+# Load necessary libraries
+library(raster)
+library(lubridate)
+library(terra)
+library(stringr)
+library(dplyr)
+
+# Define input and output directories
+input_dir <- "E:/air_polln_1km_2000_2020/BC_1km_2000_2020"
+output_dir <- "D:/cc_vulnerability/bc_anomalies"
+
+# Create output directory if it doesn't exist
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE)
+}
+
+# Function to extract date from filename
+extract_date <- function(filepath) {
+  # Extract filename from path
+  filename <- basename(filepath)
+  
+  # Extract date part (assuming format like USHAP_BC_D1K_20000101_V1)
+  date_part <- str_extract(filename, "[0-9]{8}")
+  
+  if (!is.na(date_part)) {
+    year <- as.integer(substr(date_part, 1, 4))
+    month <- as.integer(substr(date_part, 5, 6))
+    day <- as.integer(substr(date_part, 7, 8))
+    
+    # Create a Date object (not POSIXct) to avoid timezone issues
+    return(as.Date(paste(year, month, day, sep = "-")))
+  } else {
+    return(NA)
+  }
+}
+
+# Get all TIF files in the input directory
+tif_files <- list.files(input_dir, pattern = "\\.tif$", full.names = TRUE)
+cat("Found", length(tif_files), "TIF files in total\n")
+
+# Extract dates and filter files for 2010-2020
+file_dates <- sapply(tif_files, extract_date)
+valid_files <- !is.na(file_dates)
+files_with_dates <- data.frame(
+  file = tif_files[valid_files],
+  date = file_dates[valid_files],
+  stringsAsFactors = FALSE
+)
+
+# Extract year directly using substring of filename
+files_with_dates$year <- sapply(files_with_dates$file, function(f) {
+  filename <- basename(f)
+  date_part <- str_extract(filename, "[0-9]{8}")
+  return(as.integer(substr(date_part, 1, 4)))
+})
+
+# Filter for 2010-2020
+files_2010_2020 <- files_with_dates %>%
+  filter(year >= 2010 & year <= 2020) %>%
+  arrange(date)
+
+cat("Found", nrow(files_2010_2020), "TIF files for the period 2010-2020\n")
+
+# Create template raster from the first file to get dimensions and properties
+if (nrow(files_2010_2020) > 0) {
+  first_raster <- rast(files_2010_2020$file[1])
+  template <- first_raster
+  template[] <- 0
+  
+  # Initialize result rasters
+  total_exceedance <- template
+  
+  # Process all files for cumulative calculation
+  cat("Processing files for cumulative exceedance...\n")
+  
+  # Process in batches to manage memory
+  batch_size <- 100
+  total_batches <- ceiling(nrow(files_2010_2020) / batch_size)
+  
+  for (batch in 1:total_batches) {
+    start_idx <- (batch - 1) * batch_size + 1
+    end_idx <- min(batch * batch_size, nrow(files_2010_2020))
+    
+    cat("Processing batch", batch, "of", total_batches, 
+        "(files", start_idx, "to", end_idx, ")\n")
+    
+    batch_files <- files_2010_2020$file[start_idx:end_idx]
+    
+    for (file in batch_files) {
+      r <- rast(file)
+      
+      # Mark cells exceeding threshold of 35
+      exc <- r > 1
+      
+      # Add to total exceedance count
+      total_exceedance <- total_exceedance + exc
+    }
+  }
+  
+  # Save the cumulative result
+  writeRaster(total_exceedance, 
+              file.path(output_dir, "bc_exceedance_days_2010_2020.tif"),
+              overwrite = TRUE)
+  cat("Saved cumulative exceedance file\n")
+  
+  # Group files by year and month for monthly processing
+  # Extract month directly from filename
+  files_2010_2020$month <- sapply(files_2010_2020$file, function(f) {
+    filename <- basename(f)
+    date_part <- str_extract(filename, "[0-9]{8}")
+    return(as.integer(substr(date_part, 5, 6)))
+  })
+  
+  # Create monthly exceedance files by year
+  monthly_years <- files_2010_2020 %>%
+    group_by(year, month) %>%
+    summarize(files = list(file), .groups = "drop")
+  
+  # Process each year-month combination
+  cat("Processing monthly exceedances...\n")
+  
+  for (i in 1:nrow(monthly_years)) {
+    current_year <- monthly_years$year[i]
+    current_month <- monthly_years$month[i]
+    month_files <- unlist(monthly_years$files[i])
+    
+    # Skip if no files for this month
+    if (length(month_files) == 0) {
+      next
+    }
+    
+    # Reset template for this month
+    monthly_exceedance <- template
+    
+    # Process each file for this month
+    for (file in month_files) {
+      r <- rast(file)
+      exc <- r > 1
+      monthly_exceedance <- monthly_exceedance + exc
+    }
+    
+    # Create output filename with YYYY_MM format
+    month_str <- sprintf("%02d", current_month)
+    output_file <- file.path(output_dir, 
+                             paste0("bc_exceedance_days_", 
+                                   current_year, "_", month_str, ".tif"))
+    
+    # Save the monthly result
+    writeRaster(monthly_exceedance, output_file, overwrite = TRUE)
+    cat("Saved", output_file, "\n")
+  }
+  
+  # Create yearly exceedance files
+  yearly_data <- files_2010_2020 %>%
+    group_by(year) %>%
+    summarize(files = list(file), .groups = "drop")
+  
+  cat("Processing yearly exceedances...\n")
+  
+  for (i in 1:nrow(yearly_data)) {
+    current_year <- yearly_data$year[i]
+    year_files <- unlist(yearly_data$files[i])
+    
+    # Reset template for this year
+    yearly_exceedance <- template
+    
+    # Process each file for this year
+    for (file in year_files) {
+      r <- rast(file)
+      exc <- r > 1
+      yearly_exceedance <- yearly_exceedance + exc
+    }
+    
+    # Create output filename with YYYY format
+    output_file <- file.path(output_dir, 
+                            paste0("bc_exceedance_days_", current_year, ".tif"))
+    
+    # Save the yearly result
+    writeRaster(yearly_exceedance, output_file, overwrite = TRUE)
+    cat("Saved", output_file, "\n")
+  }
+  
+  cat("Processing completed successfully!\n")
+} else {
+  cat("No files found for the period 2010-2020\n")
+}
+```
+
+#read and plot for validation
+```{r}
+library(pacman)
+pacman::p_load(prism, terra, tidyverse, tidycensus, janitor, glue,
+               httr, terra, fs, httr, 
+               ncdf4, raster, stringr, sf, broom, biscale,
+               tigris, cowplot, ggpattern)
+
+conus_sf<- tigris::states(cb=F) |>
+  filter(!STUSPS %in% c("AK", "HI", "GU", "VI", "MP", "AS", "PR")) |>
+  st_transform(conus_sf, crs = 4326)
+```
+
+#pm2.5 anomalies
+```{r}
+pm_anomalies<- rast(raster("D:/cc_vulnerability/pm_anomalies/pm25_exceedance_days_2010_2020.tif"))
+pm_anomalies_projected <- project(pm_anomalies, crs(conus_sf))
+# Convert raster to a data frame for ggplot
+pm_anomalies_df <- as.data.frame(pm_anomalies_projected, xy = TRUE, na.rm = TRUE) |>
+  rename(pm_anomalie = USHAP_PM2.5_D1K_20100101_V1) |>
+  mutate(pm_tertile = ntile(pm_anomalie, 3)) |>
+  mutate(pm_tertile = factor(pm_tertile, 
+                             levels = 1:3, 
+                             labels = c("Low", "Medium", "High")))
+
+
+ggplot()+
+  geom_raster(data = pm_anomalies_df, aes(x = x, y = y, fill = pm_tertile))+
+  geom_sf(data = conus_sf, aes(geometry = geometry), fill= NA, color = "white", size = 20,  show.legend = F) +
+  theme_void()+
+  scale_fill_manual(values=
+  quartile_colors <- c(
+  "Low" = "#4169E1",  # Royal Blue
+  "Medium" = "#20B2AA",  # Light Sea Green (turquoise)
+  "High" = "#DC143C"   # Crimson
+))+
+  theme(legend.position = "bottom")+
+  guides(fill = guide_legend(
+  title = expression("PM"["2.5"]*" anomalies (>35 µg/m"^3*"): 2010–2020")
+))
+```
+
+#black carbon anomalies
+```{r}
+pm_anomalies<- rast(raster("D:/cc_vulnerability/bc_anomalies/bc_exceedance_days_2010_2020.tif"))
+pm_anomalies_projected <- project(pm_anomalies, crs(conus_sf))
+# Convert raster to a data frame for ggplot
+pm_anomalies_df <- as.data.frame(pm_anomalies_projected, xy = TRUE, na.rm = TRUE) |>
+  rename(pm_anomalie = USHAP_BC_D1K_20100101_V1) |>
+  mutate(pm_tertile = ntile(pm_anomalie, 3)) |>
+  mutate(pm_tertile = factor(pm_tertile, 
+                             levels = 1:3, 
+                             labels = c("Low", "Medium", "High")))
+
+
+ggplot()+
+  geom_raster(data = pm_anomalies_df, aes(x = x, y = y, fill = pm_tertile))+
+  geom_sf(data = conus_sf, aes(geometry = geometry), fill= NA, color = "white", size = 20,  show.legend = F) +
+  theme_void()+
+  scale_fill_manual(values=
+  quartile_colors <- c(
+  "Low" = "#4169E1",  # Royal Blue
+  "Medium" = "#20B2AA",  # Light Sea Green (turquoise)
+  "High" = "#DC143C"   # Crimson
+))+
+  theme(legend.position = "bottom")+
+  guides(fill = guide_legend(
+  title = expression("Black Carbon anomalies (>1 µg/m"^3*"): 2010–2020")
+))
+```
+
+#PM2.5 trend over time
+#step-1 get annual counts and save those files
+```{r}
+# Load required libraries
+library(tidyverse)
+library(raster)
+library(stringr)
+library(rasterVis)  # For raster visualization with ggplot2
+library(gridExtra)  # For arranging multiple plots
+library(viridis)    # For color palettes
+library(RColorBrewer)
+
+# Define paths
+exceed_dir <- "D:/cc_vulnerability/pm_anomalies/"
+annual_dir <- paste0(exceed_dir, "annual_summaries/")
+dir.create(annual_dir, showWarnings = FALSE, recursive = TRUE)
+
+# Get list of all existing exceed days raster files
+file_list <- list.files(
+  exceed_dir,
+  pattern = "exceedance_days.*\\.tif$",
+  full.names = TRUE
+)
+file_list <- file_list[!grepl("total_exceed_days|beta|p_value|r_squared|significant", file_list)]  # Exclude any analysis results
+
+cat("Found", length(file_list), "exceed days files\n")
+
+# Extract years and months from filenames
+years <- sapply(file_list, function(f) {
+  str_extract(f, "(?<=_)[0-9]{4}")
+}) |> as.numeric()
+
+months <- sapply(file_list, function(f) {
+  str_extract(f, "(?<=_)[0-9]{2}(?=\\.tif$)")
+}) |> as.numeric()
+
+
+
+# Get unique years
+unique_years <- sort(unique(years))
+cat("Found data for years:", paste(unique_years, collapse=", "), "\n")
+
+# Create annual summary rasters from monthly files
+annual_exceed_rasters <- list()
+
+for(year in unique_years) {
+  cat("Processing year", year, "\n")
+  
+  # Get files for this year
+  year_files <- file_list[years == year]
+  
+  if(length(year_files) > 0) {
+    # Load the first raster to use as template
+    template_raster <- raster(year_files[1])
+    annual_exceed <- template_raster * 0
+    
+    # Add all monthly rasters for this year
+    for(file in year_files) {
+      cat("  Adding", basename(file), "\n")
+      month_raster <- raster(file)
+      
+      # Ensure same extent and resolution
+      if(!compareRaster(month_raster, template_raster, stopiffalse=FALSE)) {
+        month_raster <- resample(month_raster, template_raster)
+      }
+      
+      annual_exceed <- annual_exceed + month_raster
+    }
+    
+    # Save annual summary
+    annual_file <- paste0(annual_dir, year, "_annual_exceed_days.tif")
+    writeRaster(annual_exceed, annual_file, overwrite = TRUE)
+    
+    # Store for regression analysis
+    annual_exceed_rasters[[as.character(year)]] <- annual_exceed
+    
+    # Report statistics
+    mean_exceed <- cellStats(annual_exceed, 'mean')
+    max_exceed <- cellStats(annual_exceed, 'max')
+    cat("  Annual", year, "- Average days exceeding normal:", round(mean_exceed, 1), 
+        "- Max days exceeding normal:", max_exceed, "\n")
+  } else {
+    cat("  No files found for year", year, "\n")
+  }
+}
+```
+
+#step-2 use the annual count raster files and run linear regression by each pixel
+```{r}
+#gc the env and reload the data
+rm(list = ls())
+gc()
+
+# Load required libraries
+library(raster)
+library(terra)  # More memory efficient than raster package
+
+# Folder path with your raster files
+raster_folder <- "D:/cc_vulnerability/pm_anomalies/annual_summaries"
+
+# List all raster files (assuming .tif extension; adjust if needed)
+raster_files <- list.files(raster_folder, pattern = "\\.tif$", full.names = TRUE)
+
+# Check if we have enough files
+if(length(raster_files) < 3) {
+  stop("Not enough years with valid data to perform regression analysis (minimum 3 required)")
+}
+
+cat("Found", length(raster_files), "raster files\n")
+
+# Use terra package for better memory management
+annual_exceed_rasters <- rast(raster_files)
+```
+
+# 3. Regression
+```{r}
+library(terra)
+
+# Set up output directory and file
+output_dir <- "D:/cc_vulnerability/pm_anomalies/regression_results"
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE)
+}
+output_file <- file.path(output_dir, "final_regression_results.tif")
+
+# Extract and order years to match layers
+years_numeric <- as.numeric(sub("^(\\d{4}).*", "\\1", names(annual_exceed_rasters)))
+order_idx <- order(years_numeric)
+annual_exceed_rasters <- annual_exceed_rasters[[order_idx]]
+years_numeric <- years_numeric[order_idx]
+
+# Regression function for each pixel
+pixel_regression <- function(values, years) {
+  if (all(is.na(values))) return(c(NA, NA, NA))
+  
+  # Skip pixels with more than 8 zero values
+  zero_count <- sum(values == 0, na.rm = TRUE)
+  if (zero_count > 8) return(c(NA, NA, NA))
+  
+  valid <- !is.na(values)
+  if (sum(valid) < 3) return(c(NA, NA, NA))
+  
+  m <- lm(values[valid] ~ years[valid])
+  s <- summary(m)
+  c(
+    beta = coef(m)[2],
+    p_value = s$coefficients[2, 4],
+    r_squared = s$r.squared
+  )
+}
+
+# Delete existing output if present
+if (file.exists(output_file)) file.remove(output_file)
+
+# Run regression on all pixels WITHOUT parallel processing
+result <- app(
+  annual_exceed_rasters,
+  fun = pixel_regression,
+  years = years_numeric,
+  cores = 10,  
+  filename = output_file,
+  overwrite = TRUE,
+  wopt = list(
+    names = c("beta", "p_value", "r_squared"),
+    datatype = "FLT4S",
+    gdal = "COMPRESS=LZW"
+  )
+)
+
+```
+
+
+#access linear reg results and plot
+```{r}
+result <- rast("D:/cc_vulnerability/pm_anomalies/regression_results/final_regression_results.tif")
+
+
+# Create a significant trend raster (p < 0.05)
+significant_trend <- beta_raster * (p_value_raster < 0.05)
+writeRaster(significant_trend, paste0(exceed_dir, "significant_trend_exceed_days.tif"), overwrite = TRUE)
+
+# Display summary statistics
+cat("\nRegression Analysis Complete\n")
+cat("Mean beta coefficient:", cellStats(beta_raster, 'mean', na.rm = TRUE), 
+    "(avg. annual change in days exceeding normal)\n")
+
+# Count cells with significant positive and negative trends
+sig_positive <- sum(values(significant_trend) > 0, na.rm = TRUE)
+sig_negative <- sum(values(significant_trend) < 0, na.rm = TRUE)
+total_valid <- sum(!is.na(values(p_value_raster < 0.05)))
+
+if(total_valid > 0) {
+  cat("Cells with significant positive trend:", sig_positive, 
+      "(", round(100 * sig_positive / total_valid, 1), "%)\n")
+  cat("Cells with significant negative trend:", sig_negative, 
+      "(", round(100 * sig_negative / total_valid, 1), "%)\n")
+} else {
+  cat("No cells with significant trends found.\n")
+}
+
+# Plot the results
+# Assuming beta_raster and p_value_raster are already created
+# If they're not available, you need to run your regression analysis first
+
+# Create significant trend raster (if not already created)
+# This assumes beta_raster and p_value_raster are already loaded
+if(!exists("significant_trend")) {
+  significant_trend <- beta_raster * (p_value_raster < 0.05)
+}
+
+# Create trend direction raster (if not already created)
+if(!exists("trend_direction")) {
+  trend_direction <- significant_trend
+  trend_direction[trend_direction > 0] <- 1  # Positive trend
+  trend_direction[trend_direction < 0] <- -1  # Negative trend
+}
+
+# Helper function to convert a raster to a data frame for ggplot
+raster_to_df <- function(raster_obj, value_name) {
+  df <- as.data.frame(raster_obj, xy = TRUE)
+  names(df)[3] <- value_name
+  return(df)
+}
+
+# Filter only the western states for PM2.5 only
+west_states <- c("WA", "OR", "CA", 
+                 "NV", "ID", "MT", "WY", 
+                 "CO", "UT", "AZ", "NM")
+
+west_sf <- conus_sf |> filter(STUSPS %in% west_states)
+
+# Convert rasters to data frames
+beta_df <- raster_to_df(result$beta, "beta") |>
+  drop_na() |>
+  st_as_sf(coords = c("x", "y"), crs = 4326) |>
+  st_filter(west_sf) |>
+  mutate(
+    x = st_coordinates(geometry)[,1],
+    y = st_coordinates(geometry)[,2]
+  ) |>
+  st_drop_geometry() |>
+  dplyr::select(x, y, beta) |>
+  filter(beta >= -10, beta <= 5)
+
+#pvalue_df <- raster_to_df(p_value_raster, "pvalue")
+#rsq_df <- raster_to_df(r_squared_raster, "rsquared")
+#sig_trend_df <- raster_to_df(significant_trend, "sig_trend")
+#trend_dir_df <- raster_to_df(trend_direction, "direction")
+
+
+# Plot 1: Beta Coefficient
+p1 <- ggplot(beta_df) +
+  geom_tile(aes(x = x, y = y, fill = beta)) +  # use tile for uneven spacing
+  scale_fill_gradient2(
+    low = "#0047AB",    # cobalt blue for negative
+    mid = "white",      # neutral
+    high = "#660000",   # crimson red for positive
+    midpoint = 0,
+    name = expression(PM[2.5]*" anomalies: 2010–2020 ("*beta*")"),
+    limits = c(-10, 5),
+  breaks = seq(-10, 5, by = 5)
+  ) +
+  geom_sf(data = conus_sf, 
+          aes(geometry = geometry), 
+          fill = NA, color = "black", 
+          size = 0.5, show.legend = FALSE) +  # Adjust size for a reasonable outline
+  theme_void() +
+  coord_sf() +  # switch from coord_equal to coord_sf
+  labs(title = "", subtitle = "") +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 12)
+  )
+
+# Arrange plots in a grid
+# First the 2x2 grid of the regression metrics
+#regression_grid <- grid.arrange(p1, p2, p3, p4, ncol = 2)
+
+# Save plots to disk
+ggsave("D:/cc_vulnerability/pm_anomalies/regression_results/pm_beta_coefficient_map_full.tiff",
+       p1, width = 8, height = 7, dpi = 300, bg="white")
+```
+
+
+
+#Black carbon trend over time
+#step-1 get annual counts and save those files
+```{r}
+# Define paths
+exceed_dir <- "D:/cc_vulnerability/bc_anomalies/"
+annual_dir <- paste0(exceed_dir, "annual_summaries/")
+dir.create(annual_dir, showWarnings = FALSE, recursive = TRUE)
+
+# Get list of all existing exceed days raster files
+file_list <- list.files(
+  exceed_dir,
+  pattern = "exceedance_days.*\\.tif$",
+  full.names = TRUE
+)
+file_list <- file_list[!grepl("total_exceed_days|beta|p_value|r_squared|significant", file_list)]  # Exclude any analysis results
+
+cat("Found", length(file_list), "exceed days files\n")
+
+# Extract years and months from filenames
+years <- sapply(file_list, function(f) {
+  str_extract(f, "(?<=_)[0-9]{4}")
+}) |> as.numeric()
+
+months <- sapply(file_list, function(f) {
+  str_extract(f, "(?<=_)[0-9]{2}(?=\\.tif$)")
+}) |> as.numeric()
+
+
+
+# Get unique years
+unique_years <- sort(unique(years))
+cat("Found data for years:", paste(unique_years, collapse=", "), "\n")
+
+# Create annual summary rasters from monthly files
+annual_exceed_rasters <- list()
+
+for(year in unique_years) {
+  cat("Processing year", year, "\n")
+  
+  # Get files for this year
+  year_files <- file_list[years == year]
+  
+  if(length(year_files) > 0) {
+    # Load the first raster to use as template
+    template_raster <- raster(year_files[1])
+    annual_exceed <- template_raster * 0
+    
+    # Add all monthly rasters for this year
+    for(file in year_files) {
+      cat("  Adding", basename(file), "\n")
+      month_raster <- raster(file)
+      
+      # Ensure same extent and resolution
+      if(!compareRaster(month_raster, template_raster, stopiffalse=FALSE)) {
+        month_raster <- resample(month_raster, template_raster)
+      }
+      
+      annual_exceed <- annual_exceed + month_raster
+    }
+    
+    # Save annual summary
+    annual_file <- paste0(annual_dir, year, "_annual_exceed_days.tif")
+    writeRaster(annual_exceed, annual_file, overwrite = TRUE)
+    
+    # Store for regression analysis
+    annual_exceed_rasters[[as.character(year)]] <- annual_exceed
+    
+    # Report statistics
+    mean_exceed <- cellStats(annual_exceed, 'mean')
+    max_exceed <- cellStats(annual_exceed, 'max')
+    cat("  Annual", year, "- Average days exceeding normal:", round(mean_exceed, 1), 
+        "- Max days exceeding normal:", max_exceed, "\n")
+  } else {
+    cat("  No files found for year", year, "\n")
+  }
+}
+```
+
+#step-2 use the annual count raster files and run linear regression by each pixel
+```{r}
+#gc the env and reload the data
+rm(list = ls())
+gc()
+
+# Folder path with your raster files
+raster_folder <- "D:/cc_vulnerability/bc_anomalies/annual_summaries"
+
+# List all raster files (assuming .tif extension; adjust if needed)
+raster_files <- list.files(raster_folder, pattern = "\\.tif$", full.names = TRUE)
+
+# Check if we have enough files
+if(length(raster_files) < 3) {
+  stop("Not enough years with valid data to perform regression analysis (minimum 3 required)")
+}
+
+cat("Found", length(raster_files), "raster files\n")
+
+# Use terra package for better memory management
+annual_exceed_rasters <- rast(raster_files)
+```
+
+# 3. Regression
+```{r}
+# Set up output directory and file
+output_dir <- "D:/cc_vulnerability/bc_anomalies/regression_results"
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE)
+}
+output_file <- file.path(output_dir, "final_regression_results1.tif")
+
+# Extract and order years to match layers
+years_numeric <- as.numeric(sub("^(\\d{4}).*", "\\1", names(annual_exceed_rasters)))
+order_idx <- order(years_numeric)
+annual_exceed_rasters <- annual_exceed_rasters[[order_idx]]
+years_numeric <- years_numeric[order_idx]
+
+# Regression function for each pixel
+pixel_regression <- function(values, years) {
+  if (all(is.na(values))) return(c(NA, NA, NA))
+  
+  # Skip pixels with more than 8 zero values
+  zero_count <- sum(values == 0, na.rm = TRUE)
+  if (zero_count > 8) return(c(NA, NA, NA))
+  
+  valid <- !is.na(values)
+  if (sum(valid) < 3) return(c(NA, NA, NA))
+  
+  m <- lm(values[valid] ~ years[valid])
+  s <- summary(m)
+  c(
+    beta = coef(m)[2],
+    p_value = s$coefficients[2, 4],
+    r_squared = s$r.squared
+  )
+}
+
+# Delete existing output if present
+if (file.exists(output_file)) file.remove(output_file)
+
+# Run regression on all pixels WITHOUT parallel processing
+result <- app(
+  annual_exceed_rasters,
+  fun = pixel_regression,
+  years = years_numeric,
+  cores = 10,  
+  filename = output_file,
+  overwrite = TRUE,
+  wopt = list(
+    names = c("beta", "p_value", "r_squared"),
+    datatype = "FLT4S",
+    gdal = "COMPRESS=LZW"
+  )
+)
+
+```
+
+
+#access linear reg results and plot
+```{r}
+# Filter only the western states for PM2.5 only
+west_states <- c("WA", "OR", "CA", 
+                 "NV", "ID", "MT", "WY", 
+                 "CO", "UT", "AZ", "NM")
+
+west_sf <- conus_sf |> filter(STUSPS %in% west_states)
+
+# Convert rasters to data frames
+beta_df <- raster_to_df(result$beta, "beta") |>
+  drop_na() |>
+  filter(beta >= -16, beta <= 10) |>
+  st_as_sf(coords = c("x", "y"), crs = 4326) |>
+  st_filter(west_sf) |>
+  mutate(
+    x = st_coordinates(geometry)[,1],
+    y = st_coordinates(geometry)[,2]
+  ) |>
+  st_drop_geometry() |>
+  select(x, y, beta) 
+
+# Plot 1: Beta Coefficient
+p1 <- ggplot(beta_df) +
+  geom_tile(aes(x = x, y = y, fill = beta)) +  # use tile for uneven spacing
+  scale_fill_gradient2(
+    low = "#0047AB",    # cobalt blue for negative
+    mid = "white",      # neutral
+    high = "#660000",   # crimson red for positive
+    midpoint = 0,
+    name = expression("Black carbon anomalies: 2010–2020 ("*beta*")"),
+    limits = c(-16, 10),
+  breaks = seq(-15, 10, by = 5)
+  ) +
+  geom_sf(data = conus_sf, 
+          aes(geometry = geometry), 
+          fill = NA, color = "black", 
+          size = 0.5, show.legend = FALSE) +  # Adjust size for a reasonable outline
+  theme_void() +
+  coord_sf() +  # switch from coord_equal to coord_sf
+  labs(title = "", subtitle = "") +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 12)
+  )
+
+# Save plots to disk
+ggsave("D:/cc_vulnerability/bc_anomalies/regression_results/bc_beta_coefficient_map.tiff",
+       p1, width = 8, height = 7, dpi = 300, bg="white")
+```
+
+
+
+

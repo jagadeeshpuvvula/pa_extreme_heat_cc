@@ -1,0 +1,63 @@
+---
+title: "05.3_prism_anoamlies"
+output: pdf_document
+date: "2025-04-23"
+---
+
+```{r}
+library(pacman)
+pacman::p_load(prism, terra, tidyverse, tidycensus, janitor, glue,
+               httr, terra, fs, httr, 
+               ncdf4, raster, stringr, sf, broom, biscale,
+               tigris, cowplot, ggpattern)
+```
+
+```{r}
+prism_set_dl_dir("D:/cc_vulnerability/prism_normals")  
+```
+
+# Download tmax normals for all 12 months (1981–2010 normals)
+```{r}
+get_prism_normals(type = "tmax", resolution = "800m", mon = 1:12)
+```
+
+#State shapefile
+```{r}
+conus_sf<- tigris::states(cb=F) |>
+  filter(!STUSPS %in% c("AK", "HI", "GU", "VI", "MP", "AS", "PR")) |>
+  st_transform(conus_sf, crs = 4326)
+```
+
+# Loop through files and save each as a .tif
+```{r}
+# List all .bil files in the directory and subdirectories
+bil_files <- list.files("D:/cc_vulnerability/prism_normals", pattern = "\\.bil$", full.names = TRUE, recursive = TRUE)
+
+output_dir <- "D:/cc_vulnerability/prism_nomal_raster"
+
+for (bil_file in bil_files) {
+  # Load the raster
+  r <- rast(bil_file)
+  
+  # Check if the raster CRS matches with CONUS boundary, if not, reproject
+  if (crs(r) != crs(conus_sf)) {
+    r <- project(r, crs(conus_sf))
+  }
+  
+  # Clip the raster with the CONUS boundary
+  r_clipped <- mask(r, vect(conus_sf))
+  
+  # Create output folder (if not already existing)
+  dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+  
+  # Extract the month or other part of the filename
+  month_name <- sub(".*_([0-9]{2})_bil$", "\\1", basename(bil_file))
+  
+  # Save the clipped raster
+  writeRaster(r_clipped, filename = file.path(output_dir, paste0( month_name, ".tif")), overwrite = TRUE)
+  
+  # Optionally, print the progress
+  message("Processed and saved: ", bil_file)
+}
+```
+

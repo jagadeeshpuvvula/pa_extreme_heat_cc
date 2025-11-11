@@ -1,0 +1,815 @@
+---
+title: "07_trivariate_hazard_mapp"
+output: pdf_document
+date: "2025-05-07"
+---
+
+```{r}
+library(pacman)
+pacman::p_load(prism, terra, tidyverse, tidycensus, janitor, glue,
+               httr, terra, fs, httr, 
+               ncdf4, raster, stringr, sf, broom, biscale,
+               tigris, cowplot, ggpattern, ggtern, patchwork, viridis, scales,
+               tidyr, RANN)
+
+#load state shapefile
+conus_sf<- tigris::states(cb=F) |>
+  filter(!STUSPS %in% c("AK", "HI", "GU", "VI", "MP", "AS", "PR")) |>
+  st_transform(conus_sf, crs = 4326) |>
+  mutate(region = case_when(
+    STUSPS %in% c("CT", "DE", "ME", "MD", "MA", "NH", "NJ", "NY", "PA", "RI", "VT", "DC") ~ "Northeast",
+    STUSPS %in% c("IA", "MI", "MN", "WI") ~ "Upper Midwest",
+    STUSPS %in% c("IL", "IN", "KY", "MO", "OH", "TN", "WV") ~ "Ohio Valley",
+    STUSPS %in% c("AL", "FL", "GA", "NC", "SC", "VA") ~ "Southeast",
+    STUSPS %in% c("MT", "NE", "ND", "SD", "WY") ~ "Northern Rockies and Plains",
+    STUSPS %in% c("AR", "KS", "LA", "MS", "OK", "TX") ~ "South",
+    STUSPS %in% c("AZ", "CO", "NM", "UT") ~ "Southwest",
+    STUSPS %in% c("ID", "OR", "WA") ~ "Northwest",
+    STUSPS %in% c("CA", "NV") ~ "West",
+    TRUE ~ NA_character_
+  ))
+```
+
+#hazard layers - skip this code once saving the files
+```{r}
+# Load rasters
+pm_anomalies <- rast("D:/cc_vulnerability/pm_anomalies/pm25_exceedance_days_2010_2020.tif")
+bc_anomalies <- rast("D:/cc_vulnerability/bc_anomalies/bc_exceedance_days_2010_2020.tif")
+temp_anomalies <- rast("D:/cc_vulnerability/exceed_count_results/total_exceed_days_2012_2024.tif")
+
+# Project all rasters to the same CRS (assuming conus_sf is your reference)
+pm_anomalies <- project(pm_anomalies, crs(conus_sf))
+bc_anomalies <- project(bc_anomalies, crs(conus_sf))
+temp_anomalies <- project(temp_anomalies, crs(conus_sf))
+
+# Resample temp_anomalies to match 1 km resolution of pm_anomalies
+temp_anomalies_resampled <- terra::resample(temp_anomalies, pm_anomalies,
+                                            method = "lanczos") # Lanczos windowed sinc resampling. (7x7 cell window)
+
+# Combine all into a single multi-layer raster
+combined_anomalies <- c(pm_anomalies, bc_anomalies, temp_anomalies_resampled)
+
+#rename hazard layers
+names(combined_anomalies) <- c("pm25_anomalies", "bc_anomalies", "temp_anomalies")
+
+#clean env
+rm(pm_anomalies, bc_anomalies, temp_anomalies)
+gc()
+
+#save harmonized hazard layer
+writeRaster(combined_anomalies, "D:/cc_vulnerability/co_exp_hazard/combined_anomalies_1km.tif", overwrite = TRUE)
+```
+
+#trivariate map
+```{r}
+combined_anomalies<- rast("D:/cc_vulnerability/co_exp_hazard/combined_anomalies_1km.tif")
+
+hazard_anomalies_df <- as.data.frame(combined_anomalies, xy = TRUE, na.rm = TRUE) |>
+  mutate(
+    pm_tertile   = factor(ntile(pm25_anomalies, 3), labels = c("Low", "Moderate", "High")),
+    bc_tertile   = factor(ntile(bc_anomalies, 3), labels = c("Low", "Moderate", "High")),
+    temp_tertile = factor(ntile(temp_anomalies, 3), labels = c("Low", "Moderate", "High")),
+    trivariate_category = paste(pm_tertile, bc_tertile, temp_tertile, sep = "-")
+  )
+
+rm(combined_anomalies)
+gc()
+```
+
+#hotspot analysis
+```{r}
+library(sf)
+library(spdep)
+library(FNN)  # Much faster than base R for KNN
+library(dplyr)
+
+optimized_hotspot_analysis <- function(hazard_sf, chunk_size = 100000, k = 20) {
+  
+  # Prepare all scores upfront (vectorized operation)
+  cat("Preparing scores...\n")
+  hazard_sf <- hazard_sf %>%
+    mutate(
+      pm_score = as.numeric(factor(pm_tertile, levels = c("Low", "Moderate", "High"))),
+      bc_score = as.numeric(factor(bc_tertile, levels = c("Low", "Moderate", "High"))),
+      temp_score = as.numeric(factor(temp_tertile, levels = c("Low", "Moderate", "High"))),
+      combined_score = (pm_score + bc_score + temp_score) / 3,
+      gi_star = NA_real_
+    )
+  
+  # Get coordinates once
+  coords <- st_coordinates(hazard_sf)
+  n_points <- nrow(hazard_sf)
+  n_chunks <- ceiling(n_points / chunk_size)
+  
+  # Process in chunks with overlap to handle edge effects
+  overlap <- k * 2
+  
+  for (i in 1:n_chunks) {
+    cat(sprintf("Processing chunk %d of %d (%d points)...\n", i, n_chunks, 
+                min(chunk_size, n_points - (i-1) * chunk_size)))
+    
+    # Define chunk boundaries with overlap
+    start_idx <- (i - 1) * chunk_size + 1
+    end_idx <- min(i * chunk_size, n_points)
+    
+    buffer_start <- max(1, start_idx - overlap)
+    buffer_end <- min(n_points, end_idx + overlap)
+    
+    # Extract chunk data
+    chunk_coords <- coords[buffer_start:buffer_end, ]
+    chunk_scores <- hazard_sf$combined_score[buffer_start:buffer_end]
+    
+    # Fast KNN using FNN package (much faster than spdep)
+    knn_result <- get.knn(chunk_coords, k = k)
+    
+    # Convert to spdep format
+    knn_nb <- vector("list", nrow(chunk_coords))
+    for (j in 1:nrow(chunk_coords)) {
+      knn_nb[[j]] <- as.integer(knn_result$nn.index[j, ])
+    }
+    class(knn_nb) <- "nb"
+    attr(knn_nb, "call") <- match.call()
+    
+    # Create weights
+    weights <- nb2listw(knn_nb, style = "W", zero.policy = TRUE)
+    
+    # Calculate Local G*
+    local_gi <- localG(chunk_scores, weights)
+    
+    # Store results (only for the actual chunk, not the overlap)
+    actual_start <- start_idx - buffer_start + 1
+    actual_end <- end_idx - buffer_start + 1
+    hazard_sf$gi_star[start_idx:end_idx] <- as.numeric(local_gi)[actual_start:actual_end]
+    
+    # Memory cleanup
+    rm(chunk_coords, chunk_scores, knn_result, knn_nb, weights, local_gi)
+    if (i %% 10 == 0) gc()  # Garbage collect every 10 chunks
+  }
+  
+  return(hazard_sf)
+}
+
+# Run the optimized analysis
+result <- optimized_hotspot_analysis(hazard_sf, chunk_size = 100000, k = 20)
+
+save(result, file = "D:/cc_vulnerability/co_exp_hazard/hot_spot_results.rda")
+```
+
+#visualize hotspot analysis results
+```{r}
+load("D:/cc_vulnerability/co_exp_hazard/hot_spot_results.rda")
+
+# Check the range of gi_star values
+cat("Gi* range:", range(result$gi_star, na.rm = TRUE), "\n")
+cat("Gi* summary:\n")
+print(summary(result$gi_star))
+
+#state shapefile
+conus_sf<- tigris::states(cb=F) |>
+  filter(!STUSPS %in% c("AK", "HI", "GU", "VI", "MP", "AS", "PR")) |>
+  st_transform(conus_sf, crs = 4326)
+
+#viz plot
+p1<- ggplot(result) +
+  geom_sf(aes(color = gi_star), size = 0.3) +
+  scale_color_gradient2(
+    low = "#4169E1", 
+    mid = "white", 
+    high = "#DC143C", 
+    midpoint = 0,
+    limits = c(-15, 15),
+    name = "Gi* score"
+  )  +
+  
+  geom_sf(
+  data = result[result$hotspot_type == "Not Significant", ],
+  aes(geometry = geometry),
+  shape = 21,
+  color = scales::alpha("grey60", 0.01),  # transparent fill
+  size = 0.01
+) +
+  geom_sf(data = conus_sf, 
+          aes(geometry = geometry), 
+          fill = NA, color = "black", 
+          size = 0.5, show.legend = FALSE)+
+  
+  theme_void() +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(hjust = 0.5)
+  ) +
+  labs(title = " ")
+
+ggsave("D:/cc_vulnerability/hazard_hot_spot_rev.tiff",
+       p1, width = 8, height = 7, dpi = 300, bg="white")
+```
+
+
+
+#trivariate hazard map
+##################################################################################
+##################################################################################
+##################################################################################
+
+```{r}
+# Define the manual sequence for plotting (grouped by color families)
+manual_sequence <- c(
+  # Group 1: 3 Highs (teal)
+  "Low-High-High", "Moderate-High-High", "High-High-High",
+  # Group 2: 2 Highs (Moderate in middle) - coral
+  "Low-Moderate-High", "Moderate-Moderate-High", "High-Moderate-High",
+  # Group 3: 2 Highs (Low in middle) - orange
+  "Low-Low-High", "Moderate-Low-High", "High-Low-High",
+  # Group 4: 1 High (last is Moderate) - purple
+  "Low-High-Moderate", "Moderate-High-Moderate", "High-High-Moderate",
+  # Group 5: 1 High (last is Low) - blue
+  "Low-High-Low", "Moderate-High-Low", "High-High-Low",
+  # Group 6: 1 High (first is High) - green
+  "High-Moderate-Low", "Low-Moderate-Moderate", "Moderate-Moderate-Moderate",
+  # Group 7: 1 High (middle or last low) - yellow-gold & bronze
+  "Moderate-Low-Moderate", "Moderate-Moderate-Low", "High-Low-Low",
+  # Group 8: 0 Highs (Moderates only) - gold/gray
+  "Low-Low-Moderate", "High-Low-Moderate", "High-Moderate-Moderate",
+  # Group 9: 0 Highs (Lows only) - pink-gray
+  "Low-Low-Low", "Low-Moderate-Low", "Moderate-Low-Low"
+)
+
+# Define the color palette (exactly as before)
+trivariate_colors <- c(
+  "Low-High-High"           = "#D0F0E8",
+  "Moderate-High-High"      = "#39A2A6",
+  "High-High-High"          = "#0D4F4F",
+  "Low-Moderate-High"       = "#FAD9D9",
+  "Moderate-Moderate-High"  = "#E36D70",
+  "High-Moderate-High"      = "#8B1E1F",
+  "Low-Low-High"            = "#FFE5CC",
+  "Moderate-Low-High"       = "#FFA366",
+  "High-Low-High"           = "#7A2E00",
+  "Low-High-Moderate"       = "#E7D7F7",
+  "Moderate-High-Moderate"  = "#7A55A7",
+  "High-High-Moderate"      = "#3E1E65",
+  "Low-High-Low"            = "#AFCBFF", 
+  "Moderate-High-Low"       = "#3B6BA5",  
+  "High-High-Low"           = "#123E6B",   
+  "High-Moderate-Low"       = "#B2E3B2",
+  "Low-Moderate-Moderate"   = "#4CAF50",
+  "Moderate-Moderate-Moderate" = "#2E7031",
+  "Moderate-Low-Moderate"   = "#FFF9B0",
+  "Moderate-Moderate-Low"   = "#FFE033",
+  "High-Low-Low"            = "#CCAA00",
+  "Low-Low-Moderate"        = "gray95",
+  "High-Low-Moderate"       = "gray75",   
+  "High-Moderate-Moderate"  = "gray50",
+  "Low-Low-Low"             = "#FFF5E1",
+  "Low-Moderate-Low"        = "#F7E7C6",
+  "Moderate-Low-Low"        = "#E6D8A7"
+)
+
+# Luminance function for text color
+luminance <- function(hex) {
+  rgb_val <- col2rgb(hex) / 255
+  r <- rgb_val[1]
+  g <- rgb_val[2]
+  b <- rgb_val[3]
+  0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+
+# Build the dataframe with group row
+df <- tibble(
+    label = manual_sequence,
+    color = trivariate_colors[manual_sequence],
+    group_row = rep(9:1, each = 3), # 9 groups, each gets a row (top to bottom)
+    PM = factor(rep(c("Low", "Moderate", "High"), times = 9), levels = c("Low", "Moderate", "High"))
+  ) %>%
+  mutate(
+    text_color = ifelse(sapply(color, luminance) > 0.5, "black", "white")
+  )
+
+# Plot
+tri_leg <- ggplot(df, aes(x = PM, y = group_row, fill = color)) +
+  geom_tile(color = "white", linewidth = 0.5) +
+  geom_text(aes(label = label), color = df$text_color, size = 3.5) +
+  scale_fill_identity() +
+  scale_y_continuous(breaks = NULL, expand = expansion(add = 0.5)) +
+  scale_x_discrete(expand = expansion(add = 0.5)) +
+  labs(x = NULL, y = NULL, title = "") +
+  theme_void() +
+  theme(
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    plot.title = element_text(hjust = 0.5, size = 14),
+    legend.position = "none",
+    plot.margin = unit(rep(-4, 4), "pt")
+  )
+
+trivariate_levels <- as.vector(outer(
+  c("Low", "Moderate", "High"),
+  outer(c("Low", "Moderate", "High"), c("Low", "Moderate", "High"), 
+        FUN = function(bc, temp) paste(bc, temp, sep = "-")),
+  FUN = function(pm, bc_temp) paste(pm, bc_temp, sep = "-"))
+)
+
+# Properly assign trivariate categories to the data
+hazard_anomalies_df <- hazard_anomalies_df %>%
+  mutate(trivariate_category = factor(
+    paste(pm_tertile, bc_tertile, temp_tertile, sep = "-"),
+    levels = trivariate_levels  # Use the vector of levels, not 'df'
+  ))
+
+# Create the co-exposure map
+coexposure_map <- ggplot(hazard_anomalies_df) +
+  geom_point(aes(x = x, y = y, color = trivariate_category), size = 0.3) +
+  geom_sf(data = conus_sf, fill = NA, color = "white", size = 1, show.legend = FALSE) +   # thick white halo
+  geom_sf(data = conus_sf, fill = NA, color = "black", size = 0.5, show.legend = FALSE) +  
+  coord_sf(expand = FALSE)+
+  scale_color_manual(values = trivariate_colors, drop = FALSE) +
+  theme_void() +
+  labs(
+    title = expression("Co-exposure to ambient PM"[2.5]~", Black carbon and Temperature"), 
+    color = ""
+  ) +
+  theme(
+    legend.position = "none", 
+    legend.title = element_text(size = 9),
+    plot.title = element_text(hjust = 0.5),
+    plot.margin = unit(c(0,0,0,0), "pt"),
+    plot.background = element_rect(fill = background_color, color = NA)
+  )
+
+
+#step-2: create individual maps of PM, bc and temperature
+
+#define legend colors
+pm_colors <- c("Low" = "#66C2A5", "Moderate" = "#41B6C4", "High" = "#2C7FB8")
+bc_colors <- c(  "Low" = "#A3B9D9",  "Moderate" = "#3A5A77", "High" = "#1C3B57")
+temp_colors <- c("Low" = "#FFEB8A", "Moderate" = "#F9D800", "High" = "#B88B00")
+
+#PM Map
+pm_map <- ggplot(hazard_anomalies_df) +
+  geom_point(aes(x = x, y = y, color = pm_tertile), size = 0.3) +
+  geom_sf(data = conus_sf, fill = NA, color = "white", size = 0.8, show.legend = FALSE) +
+  scale_color_manual(values = pm_colors, drop = FALSE) +
+  theme_void() +
+  labs(title = expression(PM[2.5]), color = "") +
+  theme(legend.position = "bottom", legend.title = element_text(size = 9),
+        legend.key.size = unit(3, "lines"),
+        legend.key.width = unit(3, "lines"),
+        plot.title = element_text(hjust = 0.5, size = 10),
+        plot.margin = unit(c(0,0,0,0), "pt"))+
+  guides(color = guide_legend(override.aes = list(size = 5, shape = 15)))
+
+#BC Map
+bc_map <- ggplot(hazard_anomalies_df) +
+  geom_point(aes(x = x, y = y, color = bc_tertile), size = 0.3) +
+  geom_sf(data = conus_sf, fill = NA, color = "white", size = 0.8, show.legend = FALSE) +
+  scale_color_manual(values = bc_colors, drop = FALSE) +
+  theme_void() +
+  labs(title = "Black Carbon", color = "")  +
+  theme(legend.position = "bottom", legend.title = element_text(size = 9),
+        legend.key.size = unit(3, "lines"),
+        legend.key.width = unit(3, "lines"),
+        plot.title = element_text(hjust = 0.5, size = 10),
+        plot.margin = unit(c(0,0,0,0), "pt"))+
+  guides(color = guide_legend(override.aes = list(size = 5, shape = 15)))
+
+#Temp Map
+temp_map <- ggplot(hazard_anomalies_df) +
+  geom_point(aes(x = x, y = y, color = temp_tertile), size = 0.3) +
+  geom_sf(data = conus_sf, fill = NA, color = "black", size = 0.8, show.legend = FALSE) +
+  scale_color_manual(values = temp_colors, drop = FALSE) +
+  theme_void() +
+  labs(title = "Temperature", color = "")  +
+  theme(legend.position = "bottom", legend.title = element_text(size = 9),
+        legend.key.size = unit(3, "lines"),
+        legend.key.width = unit(3, "lines"),
+        plot.title = element_text(hjust = 0.5, size = 10),
+        plot.margin = unit(c(0,0,0,0), "pt"))+
+  guides(color = guide_legend(override.aes = list(size = 5, shape = 15)))
+```
+
+#export map
+```{r}
+# Create a 1-row, 3-column grid for the top maps with consistent proportions
+top_row <- plot_grid(
+    pm_map, bc_map, temp_map,
+    nrow = 1, 
+    rel_widths = c(1, 1, 1),
+    align = 'h'  # Align horizontally to maintain proportions
+)
+
+# Center the coexposure map in the middle row
+middle_row <- plot_grid(
+    NULL, coexposure_map, NULL,
+    rel_widths = c(0.15, 0.7, 0.15),  # Add padding on sides for centering
+    nrow = 1
+)
+
+# Place the trivariate legend centered at the bottom
+bottom_row <- plot_grid(
+    tri_leg,
+    nrow = 1,
+    rel_widths = c(0.1, 0.8, 0.1)
+)
+
+# Combine all three rows
+final_plot <- plot_grid(
+    top_row, 
+    middle_row,
+    bottom_row,
+    ncol = 1, 
+    rel_heights = c(0.8, 1.3, 0.5) 
+)
+
+# Save as TIFF with 300 dpi
+ggsave("D:/cc_vulnerability/mansc_results/trivariate_figure.tiff", 
+       plot = final_plot, 
+       dpi = 300, width = 12, height = 10, units = "in",
+       bg = "white")
+```
+
+#Risk mapping
+##################################################################################
+##################################################################################
+##################################################################################
+
+#load pediatric index PC1 and EFA1
+```{r}
+tracts_conus <- st_read("D:/cc_vulnerability/tracts_shp/tracts_conus_shape.shp") |>
+  dplyr::select(c(1, 5))
+
+ped_indx <- read_csv("D:/cc_vulnerability/mansc_results/index_vars/all_indicies_combined.csv") |>
+  dplyr::select(c(1, 14, 16)) |>
+  right_join(tracts_conus, by= "geoid") 
+
+# First, make sure ped_indx is an sf object with geometry
+if (!("sf" %in% class(ped_indx))) {
+  # If it lost its sf class during the join, convert it back
+  ped_indx <- st_as_sf(ped_indx)
+}
+
+# Set the CRS to NAD83 (EPSG:4269)
+ped_indx <- st_set_crs(ped_indx, 4269)  # EPSG code for NAD83
+
+rm(tracts_conus)
+gc()
+```
+
+#Hazard layer
+```{r}
+combined_anomalies<- rast("D:/cc_vulnerability/co_exp_hazard/combined_anomalies_1km.tif")
+```
+
+#join pediatric index to hazard anomalies
+#Rasterized multipolygon data using area weighted average
+#includes multistage smoothing at census block boundaries
+```{r}
+# Transform vector data to match raster CRS if needed
+if (st_crs(ped_indx) != crs(combined_anomalies)) {
+  print("Transforming vector data to match raster CRS...")
+  ped_indx <- st_transform(ped_indx, crs(combined_anomalies))
+}
+
+# Remove empty geometries
+ped_indx <- ped_indx[!st_is_empty(ped_indx), ]
+print(paste("Number of polygons after removing empty geometries:", nrow(ped_indx)))
+
+# Extract the variables we want to rasterize
+variables_to_rasterize <- c("PC1", "EFA_1")
+print(paste("Variables to rasterize:", paste(variables_to_rasterize, collapse=", ")))
+
+# Create a template raster from combined_anomalies (use first layer)
+template_raster <- combined_anomalies[[1]]
+
+# Function to rasterize a variable using area-weighted mean
+rasterize_variable <- function(variable_name, polygons, template) {
+  print(paste("Rasterizing", variable_name, "..."))
+  
+  # Check if variable exists in the polygon data
+  if (!variable_name %in% names(polygons)) {
+    stop(paste("Variable", variable_name, "not found in polygon data"))
+  }
+  
+  # Create a numeric vector from the variable (required for rasterize)
+  values_vector <- polygons[[variable_name]]
+  
+  # Handle any non-numeric values (NAs, etc.)
+  if (!is.numeric(values_vector)) {
+    warning(paste("Converting", variable_name, "to numeric"))
+    values_vector <- as.numeric(values_vector)
+  }
+
+  # Rasterize the variable
+  # - fun="mean" calculates the area-weighted mean when multiple polygons overlap a cell
+  # - na.rm=TRUE ignores NA values
+  # - weights=TRUE ensures values are weighted by the area of overlap
+  r <- terra::rasterize(
+    x = vect(polygons), 
+    y = template,
+    field = variable_name,
+    fun = "mean",
+    na.rm = TRUE
+  )
+  
+  # Return the rasterized variable
+  return(r)
+}
+
+# Create list to store rasterized variables
+rasterized_variables <- list()
+
+# Rasterize each variable
+for (var in variables_to_rasterize) {
+  start_time <- Sys.time()
+  rasterized_variables[[var]] <- rasterize_variable(var, ped_indx, template_raster)
+  end_time <- Sys.time()
+  print(paste("Completed rasterizing", var, "in", 
+              round(difftime(end_time, start_time, units = "mins"), 2), "minutes"))
+}
+
+# Combine rasterized variables into a single multi-layer SpatRaster
+census_rasters <- rasterized_variables[[1]]
+for(i in 2:length(rasterized_variables)) {
+  census_rasters <- c(census_rasters, rasterized_variables[[i]])
+}
+names(census_rasters) <- variables_to_rasterize
+
+#save pediatric vulnerability index in raster format
+terra::writeRaster(census_rasters, "D:/cc_vulnerability/mansc_data/census_variables_1km.tif", overwrite = TRUE)
+
+#combine pediatric vulnerability and hazard layers
+all_layers <- c(combined_anomalies, census_rasters)
+names(all_layers) <- c(names(combined_anomalies), names(census_rasters))
+
+# Write combined raster to disk as a single multi-band GeoTIFF
+terra::writeRaster(all_layers, 
+                   "D:/cc_vulnerability/mansc_data/risk_map_rast_1km.tif", 
+                   overwrite = TRUE)
+```
+
+#combine pediatric vulnerability and hazard layers
+```{r}
+ped_risk <- rast("D:/cc_vulnerability/mansc_data/risk_map_rast_1km.tif")
+
+ped_risk_df <- as.data.frame(ped_risk, xy = TRUE, na.rm = TRUE) |>
+  mutate(
+    pm_tertile   = factor(ntile(pm25_anomalies, 3), labels = c("Low", "Moderate", "High")),
+    bc_tertile   = factor(ntile(bc_anomalies, 3), labels = c("Low", "Moderate", "High")),
+    temp_tertile = factor(ntile(temp_anomalies, 3), labels = c("Low", "Moderate", "High")),
+    hazard = paste(pm_tertile, bc_tertile, temp_tertile, sep = "-"),
+    vul_pc1 = factor(ntile(PC1, 3), labels = c("Low", "Moderate", "High")),
+    vul_efa = factor(ntile(EFA_1, 3), labels = c("Low", "Moderate", "High"))
+  ) |>
+  dplyr::select(-c(pm_tertile, bc_tertile, temp_tertile))
+
+
+
+```
+
+```{r}
+coexposure_map <- ggplot(ped_risk_df) +
+  geom_point(
+    aes(
+      x = x, 
+      y = y, 
+      color = ifelse(vul_pc1 == "Low", "Low", hazard)
+    ),
+    size = 0.3
+  )  +
+  geom_sf(data = conus_sf, fill = NA, color = "white", size = 1, show.legend = FALSE) +   # thick white halo
+  geom_sf(data = conus_sf, fill = NA, color = "black", size = 0.5, show.legend = FALSE) +  
+  
+  geom_sf(
+    data = conus_sf |> group_by(region) |> summarise(),
+    fill = NA,
+    color = "white",
+    size = 3,
+    linetype = "solid",
+    show.legend = FALSE
+  ) +
+  # Second: black line on top
+  geom_sf(
+    data = conus_sf |> group_by(region) |> summarise(),
+    fill = NA,
+    color = "black",
+    size = 1.2,
+    linetype = "solid",
+    show.legend = FALSE
+  ) +
+  
+  coord_sf(expand = FALSE)+
+  scale_color_manual(
+    values = c("Low" = "white", trivariate_colors),
+    drop = FALSE
+  ) +
+  theme_void() +
+  labs(
+    title = expression("Pediatric risk with \nco-exposure to ambient PM"[2.5]~", Black carbon and Temperature"), 
+    color = ""
+  ) +
+  theme(
+    legend.position = "none", 
+    legend.title = element_text(size = 9),
+    plot.title = element_text(hjust = 0.5),
+    plot.margin = unit(c(0,0,0,0), "pt")
+  )
+
+#west and southwest
+
+
+
+# Save as TIFF with 300 dpi
+ggsave("D:/cc_vulnerability/mansc_results/risk_mapping.tiff", 
+       plot = coexposure_map, 
+       dpi = 300, width = 12, height = 10, units = "in",
+       bg = "white")
+```
+
+#risk mapping final figure
+#load data
+```{r}
+#Hazard layer
+hazard_anomalies_filt<- hazard_anomalies_df |>
+  mutate(
+    condensed_category = case_when(
+      str_count(trivariate_category, "High") >= 2 ~ "High",
+      str_count(trivariate_category, "High") == 1 ~ "Moderate", 
+      str_count(trivariate_category, "High") == 0 ~ "Low"
+    )
+  ) |>
+  dplyr::select(c(1,2,9,10)) |>
+  st_as_sf(coords = c("x", "y"), crs = 4269) 
+
+##################################################################################
+#RUCA layer
+load("D:/cc_vulnerability/ruca_sf.rda") 
+
+ruca_shp <- ruca_shp |>
+  mutate(ruca_category = case_when(
+    prima_ruca %in% 1:3 ~ "Metropolitan",
+    prima_ruca %in% 4:6 ~ "Micropolitan",
+    prima_ruca %in% 7:10 ~ "Small_town_Rural",
+    prima_ruca == 99 ~ NA_character_,
+    TRUE ~ NA_character_
+  )) |>
+  drop_na() |>
+  dplyr::select(c(1,10,12, 13,20, 21)) 
+
+# Set the CRS to NAD83 (EPSG:4269)
+ruca_shp_sf <- st_set_crs(ruca_shp, 4269)  # EPSG code for NAD83
+
+#################################################################################
+#Vulnerability layer
+tracts_conus <- st_read("D:/cc_vulnerability/tracts_shp/tracts_conus_shape.shp") |>
+  dplyr::select(c(1, 5))
+
+ped_indx <- read_csv("D:/cc_vulnerability/mansc_results/index_vars/all_indicies_combined.csv") |>
+  dplyr::select(c(1, 14)) |>
+  right_join(tracts_conus, by= "geoid") |>
+  mutate(PC1_cat   = factor(ntile(PC1, 3), labels = c("Low", "Moderate", "High")))
+
+# First, make sure ped_indx is an sf object with geometry
+if (!("sf" %in% class(ped_indx))) {
+  # If it lost its sf class during the join, convert it back
+  ped_indx <- sf::st_as_sf(ped_indx)
+}
+
+# Set the CRS to NAD83 (EPSG:4269)
+ped_indx <- st_set_crs(ped_indx, 4269)  # EPSG code for NAD83
+
+rm(tracts_conus)
+```
+
+#join hazard and vulnerability
+```{r}
+hazard_joined <- st_join(
+  hazard_anomalies_filt, 
+  ped_indx, 
+  left = TRUE,   # keep all hazard points
+  join = st_within # or st_intersects, depending on your data
+)
+
+# Find indices of points with NA in PC1_cat (i.e., not matched to any tract)
+unmatched_idx <- which(is.na(hazard_joined$PC1_cat))
+
+if(length(unmatched_idx) > 0) {
+  # Find the index of the nearest polygon for each unmatched point
+  nearest_idx <- st_nearest_feature(hazard_anomalies_filt[unmatched_idx, ], ped_indx)
+  
+  # For each unmatched point, assign the attributes of the nearest polygon
+  hazard_joined[unmatched_idx, names(st_drop_geometry(ped_indx))] <-
+    st_drop_geometry(ped_indx)[nearest_idx, ]
+}
+
+save(conus_sf, hazard_anomalies_filt, hazard_joined, ruca_shp_sf,
+     file = "D:/cc_vulnerability/risk_map_fin/risk_map_files.rda")
+
+```
+
+#data prep for viz
+```{r}
+load("D:/cc_vulnerability/risk_map_fin/risk_map_files.rda")
+
+hazard_joined_plt<- hazard_joined |>
+  mutate(bi_class = paste(condensed_category, PC1_cat, sep = "-")) |>
+  cbind(st_coordinates(hazard_joined)) |>
+  st_drop_geometry() |>
+  mutate(
+    condensed_cat_num = case_when(
+      condensed_category == "Low" ~ 1,
+      condensed_category == "Moderate" ~ 2,
+      condensed_category == "High" ~ 3
+    ),
+    PC1_cat_num = case_when(
+      PC1_cat == "Low" ~ 1,
+      PC1_cat == "Moderate" ~ 2,
+      PC1_cat == "High" ~ 3
+    ),
+    bi_class = paste(condensed_cat_num, PC1_cat_num, sep = "-")
+  ) |>
+  st_as_sf(coords = c("X", "Y"), crs = 4326, remove = FALSE)
+
+# 1. Ensure valid geometries (optional but recommended)
+ruca_shp_sf <- st_make_valid(ruca_shp_sf) |>
+  st_transform(4326)
+
+ruca_dissolved <- ruca_shp_sf |>
+  group_by(ruca_category) |>
+  summarise(geometry = st_union(geometry), .groups = "drop") |>
+  filter(ruca_category == "Small_town_Rural")
+```
+
+```{r}
+custom_pal3 <- c(
+  "1-1" = "#d8e8b0", 
+  "2-1" = "#fdb863", 
+  "3-1" = "#e66101",
+  
+  "1-2" = "#90b8b4", 
+  "2-2" = "#9e8ac1", 
+  "3-2" = "#5e3c99",
+  
+  "1-3" = "#207068", 
+  "2-3" = "#6982a0", 
+  "3-3" = "#053061"
+)
+
+
+
+# Now preview the palette
+bi_pal(pal = custom_pal3, dim = 3)
+
+
+map <- ggplot() +
+  geom_tile(
+    data = hazard_joined_plt, 
+    aes(x = X, y = Y, fill = bi_class), 
+    show.legend = FALSE
+  ) +
+  geom_sf(
+    data = conus_sf, 
+    fill = NA, color = "black",
+    size = 0.5,  
+    show.legend = FALSE
+  ) +
+#  geom_sf_pattern(
+#    data = ruca_dissolved,
+#    aes(),  # No fill aesthetic here
+#    pattern = "circle",            # Or try "circle", "crosshatch", etc.
+#    pattern_fill = "white",       # Pattern color
+#    pattern_alpha = 0.3,           # Pattern transparency (0 = fully transparent, 1 = fully opaque)
+#    fill = NA,                     # No solid fill, so background shows through
+#    color = NA,                    # No border
+#    pattern_density = 0.9,         # Adjust density to taste
+#    pattern_spacing = 0.01,
+#    pattern_size = 0.01 # Adjust spacing for visibility
+#  ) +
+  labs(x = NULL, y = NULL) +
+  bi_scale_fill(pal = custom_pal3, dim = 3) +
+  theme_void() +
+  theme(legend.position = "none") +
+  bi_theme()
+
+
+ggsave("D:/cc_vulnerability/risk_map_fin/risk_map_final.tiff", 
+       plot = map, 
+       dpi = 300, width = 12, height = 10, units = "in",
+       bg = "white")
+```
+
+```{r}
+legend <- bi_legend(pal = custom_pal3,
+                   dim = 3,
+                   xlab = "Co-exposure to hazard",
+                   ylab = "Pediatric vulnerability",
+                   size = 10)
+
+ggsave("D:/cc_vulnerability/risk_map_fin/legend_component.tiff", 
+       plot = legend, 
+       width = 5, height = 2.5, 
+       dpi = 300, 
+       device = "tiff", 
+       compression = "lzw")
+```
+
+
