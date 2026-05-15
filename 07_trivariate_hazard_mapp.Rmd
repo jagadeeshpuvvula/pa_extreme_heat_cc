@@ -150,14 +150,22 @@ optimized_hotspot_analysis <- function(hazard_sf, chunk_size = 100000, k = 20) {
 }
 
 # Run the optimized analysis
-result <- optimized_hotspot_analysis(hazard_sf, chunk_size = 100000, k = 20)
+hazard_sf <- st_as_sf(
+  hazard_anomalies_df,
+  coords = c("x", "y"),  # longitude and latitude columns
+  crs = 4326,  # WGS84 coordinate system (standard lat/lon)
+  remove = FALSE  # Keep x and y columns in the data
+)
 
-save(result, file = "D:/cc_vulnerability/co_exp_hazard/hot_spot_results.rda")
+result_25 <- optimized_hotspot_analysis(hazard_sf, chunk_size = 100000, k = 25)
+
+save(result_25, file = "D:/cc_vulnerability/co_exp_hazard/hot_spot_results_k25.rda")
 ```
 
 #visualize hotspot analysis results
 ```{r}
-load("D:/cc_vulnerability/co_exp_hazard/hot_spot_results.rda")
+load("D:/cc_vulnerability/co_exp_hazard/hot_spot_results_k25.rda")
+result<- result_25
 
 # Check the range of gi_star values
 cat("Gi* range:", range(result$gi_star, na.rm = TRUE), "\n")
@@ -200,8 +208,14 @@ p1<- ggplot(result) +
   ) +
   labs(title = " ")
 
-ggsave("D:/cc_vulnerability/hazard_hot_spot_rev.tiff",
-       p1, width = 8, height = 7, dpi = 300, bg="white")
+ggsave(
+  filename = "D:/cc_vulnerability/hazard_hot_spot_rev_k25.tiff",
+  plot = p1,
+  width = 8,
+  height = 7,
+  dpi = 300,
+  bg = "white"
+)
 ```
 
 
@@ -729,6 +743,9 @@ hazard_joined_plt<- hazard_joined |>
   ) |>
   st_as_sf(coords = c("X", "Y"), crs = 4326, remove = FALSE)
 
+extra_plot<- hazard_joined_plt |>
+  filter(bi_class == "3-3")
+
 # 1. Ensure valid geometries (optional but recommended)
 ruca_shp_sf <- st_make_valid(ruca_shp_sf) |>
   st_transform(4326)
@@ -740,61 +757,76 @@ ruca_dissolved <- ruca_shp_sf |>
 ```
 
 ```{r}
+# Custom 3x3 palette
 custom_pal3 <- c(
-  "1-1" = "#d8e8b0", 
-  "2-1" = "#fdb863", 
-  "3-1" = "#e66101",
-  
-  "1-2" = "#90b8b4", 
-  "2-2" = "#9e8ac1", 
-  "3-2" = "#5e3c99",
-  
-  "1-3" = "#207068", 
-  "2-3" = "#6982a0", 
-  "3-3" = "#053061"
+    "1-1" = "#f3f8ef",
+    "2-1" = "#cfe6c8",
+    "3-1" = "#7fbe7a",
+    
+    "1-2" = "#dff4f4",
+    "2-2" = "#8fd6d6",
+    "3-2" = "#38bfcf",
+    
+    "1-3" = "#d7e4fb",
+    "2-3" = "#7ea6f2",
+    "3-3" = "#2f5bd3"
 )
 
-
-
-# Now preview the palette
+# Preview palette
 bi_pal(pal = custom_pal3, dim = 3)
 
-
+# Main map
 map <- ggplot() +
-  geom_tile(
-    data = hazard_joined_plt, 
-    aes(x = X, y = Y, fill = bi_class), 
-    show.legend = FALSE
-  ) +
-  geom_sf(
-    data = conus_sf, 
-    fill = NA, color = "black",
-    size = 0.5,  
-    show.legend = FALSE
-  ) +
-#  geom_sf_pattern(
-#    data = ruca_dissolved,
-#    aes(),  # No fill aesthetic here
-#    pattern = "circle",            # Or try "circle", "crosshatch", etc.
-#    pattern_fill = "white",       # Pattern color
-#    pattern_alpha = 0.3,           # Pattern transparency (0 = fully transparent, 1 = fully opaque)
-#    fill = NA,                     # No solid fill, so background shows through
-#    color = NA,                    # No border
-#    pattern_density = 0.9,         # Adjust density to taste
-#    pattern_spacing = 0.01,
-#    pattern_size = 0.01 # Adjust spacing for visibility
-#  ) +
-  labs(x = NULL, y = NULL) +
-  bi_scale_fill(pal = custom_pal3, dim = 3) +
-  theme_void() +
-  theme(legend.position = "none") +
-  bi_theme()
+    geom_tile(
+        data = hazard_joined_plt,
+        aes(x = X, y = Y, fill = bi_class),
+        show.legend = FALSE
+    ) +
+    geom_sf(
+        data = conus_sf,
+        fill = NA,
+        color = "black",
+        linewidth = 0.35,
+        show.legend = FALSE
+    ) +
+    labs(x = NULL, y = NULL) +
+    bi_scale_fill(pal = custom_pal3, dim = 3) +
+    theme_void() +
+    theme(
+        legend.position = "none",
+        plot.background = element_rect(fill = "white", color = NA),
+        panel.background = element_rect(fill = "white", color = NA)
+    ) +
+    bi_theme()
 
+# Bivariate legend
+legend <- bi_legend(
+    pal = custom_pal3,
+    dim = 3,
+    xlab = "Co-exposure to hazard",
+    ylab = "Population vulnerability",
+    size = 8,
+    pad_width = 0.2,
+    pad_color = "white"
+)
 
-ggsave("D:/cc_vulnerability/risk_map_fin/risk_map_final.tiff", 
-       plot = map, 
-       dpi = 300, width = 12, height = 10, units = "in",
-       bg = "white")
+# Combine map + inset legend into one figure
+final_plot <- ggdraw() +
+    draw_plot(map, x = 0, y = 0, width = 1, height = 1) +
+    draw_plot(legend, x = 0.06, y = 0.08, width = 0.22, height = 0.22)
+
+# Save as 300 dpi TIFF
+ggsave(
+    filename = "D:/cc_vulnerability/risk_map_fin/risk_map_final_x.tiff",
+    plot = final_plot,
+    device = "tiff",
+    width = 12,
+    height = 9,
+    units = "in",
+    dpi = 300,
+    compression = "lzw",
+    bg = "white"
+)
 ```
 
 ```{r}
@@ -811,5 +843,32 @@ ggsave("D:/cc_vulnerability/risk_map_fin/legend_component.tiff",
        device = "tiff", 
        compression = "lzw")
 ```
+
+#extra plot
+```{r}
+ggplot() +
+  geom_tile(
+    data = extra_plot, 
+    aes(x = X, y = Y, fill = bi_class, colour = "royalblue"), 
+    show.legend = FALSE
+  ) +
+  geom_sf(
+    data = conus_sf, 
+    fill = NA, color = "black",
+    size = 0.5,  
+    show.legend = FALSE
+  ) +
+  labs(x = NULL, y = NULL) +
+  theme_void() +
+  theme(legend.position = "none")
+
+ggsave("D:/cc_vulnerability/extra_plot.tiff", 
+       plot = last_plot(), 
+       dpi = 300, width = 8, height = 6, units = "in",
+       bg = "white")
+```
+
+
+
 
 

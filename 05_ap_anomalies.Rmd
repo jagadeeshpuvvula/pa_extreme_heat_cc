@@ -763,6 +763,63 @@ ggsave("D:/cc_vulnerability/bc_anomalies/regression_results/bc_beta_coefficient_
        p1, width = 8, height = 7, dpi = 300, bg="white")
 ```
 
+#zoom to omaha NE
+```{r}
+library(terra)
+library(dplyr)
+library(ggplot2)
+library(sf)
+library(tigris)
+library(patchwork)
+
+omaha_sf <- places(state = "NE", cb = TRUE) |>
+  filter(NAME == "Omaha") |>
+  st_transform(4326)
+
+pm <- rast("D:/cc_vulnerability/pm_anomalies/pm25_exceedance_days_2010_2020.tif")
+bc <- rast("D:/cc_vulnerability/bc_anomalies/bc_exceedance_days_2010_2020.tif")
+
+make_df <- function(r){
+  names(r) <- "value"
+  
+  r |>
+    project("EPSG:4326") |>
+    crop(vect(omaha_sf)) |>
+    mask(vect(omaha_sf)) |>
+    as.data.frame(xy = TRUE, na.rm = TRUE) |>
+    mutate(decile = factor(ntile(value, 10), labels = paste0("D", 1:10)))
+}
+
+pm_df <- make_df(pm)
+bc_df <- make_df(bc)
+
+decile_colors <- c(
+  "#313695","#4575B4","#74ADD1","#ABD9E9","#E0F3F8",
+  "#FEE090","#FDAE61","#F46D43","#D73027","#A50026"
+)
+
+p1 <- ggplot(pm_df) +
+  geom_raster(aes(x, y, fill = decile)) +
+  geom_sf(data = omaha_sf, fill = NA, color = "white", linewidth = 1) +
+  scale_fill_manual(values = decile_colors) +
+  coord_sf(expand = FALSE) +
+  labs(title = "PM2.5") +
+  theme_void() +
+  theme(legend.position = "bottom")
+
+p2 <- ggplot(bc_df) +
+  geom_raster(aes(x, y, fill = decile)) +
+  geom_sf(data = omaha_sf, fill = NA, color = "white", linewidth = 1) +
+  scale_fill_manual(values = decile_colors) +
+  coord_sf(expand = FALSE) +
+  labs(title = "Black Carbon") +
+  theme_void() +
+  theme(legend.position = "bottom")
+
+(p1 | p2) +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+```
 
 
 
