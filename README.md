@@ -1,4 +1,4 @@
-# Pediatric Risk Mapping from Co-Exposure to Extreme Temperatures and Air Pollutants
+# Puvvula, J., Szeto, J. J., Taiba, J., Ko, J.,Bell, J. E., Hwang, W.‐T., et al. (2026).Pediatric risk mapping from co‐exposureto extreme temperatures and air pollutants.GeoHealth, 10, e2025GH001743. https://doi.org/10.1029/2025GH001743
 
 # R version and dependencies
 R version 4.5.0 (2025-04-11 ucrt)
